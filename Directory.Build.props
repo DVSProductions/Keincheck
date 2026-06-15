@@ -16,7 +16,7 @@
   <!-- Shared product / package metadata. Version is the single source of truth for
        assembly versions; the Velopack release version is passed to `vpk pack -v`. -->
   <PropertyGroup>
-    <Version>0.5.1</Version>
+    <Version>0.6.0</Version>
     <Authors>Valentino Saitz</Authors>
     <Company>DVSProductions</Company>
     <Product>Keincheck</Product>

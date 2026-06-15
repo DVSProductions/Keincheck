@@ -460,7 +460,8 @@ coordinates and is robust to layout shifts.
     /// </summary>
     private static readonly string? HubAssemblyVersion = ResolveHubAssemblyVersion();
 
-    private static string? ResolveHubAssemblyVersion()
+    /// <summary>The hub's clean informational version (shared with the MCP server-version handshake).</summary>
+    internal static string? ResolveHubAssemblyVersion()
     {
         try
         {

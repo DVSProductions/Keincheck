@@ -35,4 +35,17 @@ public sealed class HubOptions
     /// (single active client at a time).
     /// </summary>
     public bool QualifyToolNames { get; set; }
+
+    /// <summary>
+    /// When true, an <i>installed</i> hub polls GitHub for a newer release and applies it
+    /// automatically — but only while no client is connected, so an AI session is never
+    /// interrupted. A no-op for dev / non-Velopack-installed runs. Default true.
+    /// </summary>
+    public bool AutoUpdate { get; set; } = true;
+
+    /// <summary>The GitHub repository the hub's Velopack releases are published to.</summary>
+    public string UpdateRepoUrl { get; set; } = "https://github.com/DVSProductions/Keincheck";
+
+    /// <summary>How often the auto-updater polls for a newer release. Default 1 hour.</summary>
+    public TimeSpan UpdateCheckInterval { get; set; } = TimeSpan.FromHours(1);
 }

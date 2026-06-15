@@ -30,7 +30,11 @@ public static class Program
         // Best-effort: register to start at login so the hub is up when the AI connects.
         StartupRegistration.TryRegister();
 
-        var hubOptions = new HubOptions();
+        var hubOptions = new HubOptions
+        {
+            // Advertise the real build on the MCP initialize handshake (not a hardcoded stub).
+            ServerVersion = HubMetaTools.ResolveHubAssemblyVersion() ?? "0.0.0",
+        };
         var brokerOptions = new BrokerOptions
         {
             PipeName = PipeNames.ControlPipe,
@@ -43,12 +47,25 @@ public static class Program
         // The MCP server (meta-tools + proxy) + the MCP-over-pipe listener wrap the broker.
         HubRuntime.Start(broker, hubOptions);
 
+        // Auto-update an installed hub in the background, applying only while idle. A no-op
+        // for dev builds (CreateGithub returns null when this is not a Velopack install).
+        HubUpdater? updater = null;
+        if (hubOptions.AutoUpdate)
+        {
+            updater = HubUpdater.CreateGithub(
+                broker, hubOptions.UpdateRepoUrl, hubOptions.UpdateCheckInterval,
+                msg => Console.Error.WriteLine($"[keincheck-hub:update] {msg}"));
+            updater?.Start();
+        }
+
         try
         {
             return BuildAvaloniaApp(broker).StartWithClassicDesktopLifetime(args);
         }
         finally
         {
+            if (updater is not null)
+                updater.DisposeAsync().AsTask().GetAwaiter().GetResult();
             HubRuntime.StopAsync().GetAwaiter().GetResult();
             broker.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
