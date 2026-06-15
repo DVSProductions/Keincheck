@@ -253,8 +253,9 @@ public sealed partial class WpfUiAdapter
             error =
                 "Render produced a fully transparent bitmap. WPF's RenderTargetBitmap is not " +
                 $"functional in this process (RenderCapability.Tier={RenderCapability.Tier >> 16}); " +
-                "this happens when WPF falls back to the Tier-0 software rasterizer with no working " +
-                "MIL render target (headless / no GPU access / certain remote or service sessions). " +
+                "this happens when WPF has no live display/render surface — most commonly a LOCKED " +
+                "WORKSTATION or a disconnected RDP session, but also a headless / no-GPU / service " +
+                "session. Unlock the desktop (or use an interactive session) and rendering works. " +
                 "The visual tree, properties, automation and synthetic-input tools are unaffected.";
             return false;
         }
@@ -439,9 +440,9 @@ public sealed partial class WpfUiAdapter
         if (IsUniform(captured))
         {
             error =
-                "GDI PrintWindow captured a uniform (blank) image: this window is not rendered to a " +
-                "capturable surface in this session (Tier-0 software rasterizer / no DWM/display surface). " +
-                "On a normal interactive desktop the capture contains the real UI.";
+                "GDI PrintWindow captured a uniform (blank) image: this window has no live display " +
+                "surface to capture — most commonly a LOCKED WORKSTATION or disconnected RDP session. " +
+                "On an unlocked interactive desktop the capture contains the real UI.";
             return false;
         }
 
