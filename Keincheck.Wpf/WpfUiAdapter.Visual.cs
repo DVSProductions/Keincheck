@@ -32,16 +32,37 @@ public sealed partial class WpfUiAdapter
         png = Array.Empty<byte>();
         error = string.Empty;
 
-        // A Window renders as a whole visual; any other FrameworkElement renders its own
-        // subtree (with a window-crop fallback). This mirrors the Avalonia adapter's
-        // TopLevel-vs-Control split behind one neutral method.
+        if (element is not FrameworkElement target)
+        {
+            error = "Target is not a renderable visual.";
+            return false;
+        }
+
+        // Primary: WPF's RenderTargetBitmap (works on a healthy MIL render target).
+        if (TryRenderViaRtb(target, maxDim, out png, out var rtbError))
+            return true;
+
+        // Fallback: capture the actual on-screen window pixels via Win32 PrintWindow and crop
+        // to the element. This bypasses WPF's renderer entirely, so it still yields pixels when
+        // RenderTargetBitmap is dead on the Tier-0 software rasterizer (headless / no GPU access
+        // / certain RDP & service sessions) — exactly the case where the primary path is blank.
+        if (TryRenderViaGdi(target, maxDim, out png, out var gdiError))
+            return true;
+
+        error = $"RenderTargetBitmap path failed ({rtbError}) and the GDI PrintWindow fallback also failed ({gdiError}).";
+        return false;
+    }
+
+    /// <summary>
+    /// The RenderTargetBitmap path: a <see cref="Window"/> renders as a whole visual; any other
+    /// <see cref="FrameworkElement"/> renders its own subtree (with a window-crop fallback).
+    /// Returns false (no terminal error) when the render is blank so the caller can try GDI.
+    /// </summary>
+    private bool TryRenderViaRtb(FrameworkElement element, int maxDim, out byte[] png, out string error)
+    {
         if (element is Window window)
             return TryRenderWindowToPng(window, maxDim, out png, out error);
-        if (element is FrameworkElement fe)
-            return TryRenderControlToPng(fe, maxDim, out png, out error);
-
-        error = "Target is not a renderable visual.";
-        return false;
+        return TryRenderControlToPng(element, maxDim, out png, out error);
     }
 
     /// <summary>
@@ -272,6 +293,32 @@ public sealed partial class WpfUiAdapter
     }
 
     /// <summary>
+    /// True if every pixel of <paramref name="source"/> is the same colour — the signature of
+    /// a blank capture (a real UI always has at least one differing pixel). Scans the Bgr24 bytes.
+    /// </summary>
+    private static bool IsUniform(BitmapSource source)
+    {
+        var bmp = source.Format == PixelFormats.Bgr24
+            ? source
+            : new FormatConvertedBitmap(source, PixelFormats.Bgr24, null, 0);
+
+        var w = bmp.PixelWidth;
+        var h = bmp.PixelHeight;
+        if (w <= 0 || h <= 0)
+            return true;
+
+        var stride = w * 3;
+        var px = new byte[h * stride];
+        bmp.CopyPixels(px, stride, 0);
+
+        byte b0 = px[0], g0 = px[1], r0 = px[2];
+        for (var i = 0; i < px.Length; i += 3)
+            if (px[i] != b0 || px[i + 1] != g0 || px[i + 2] != r0)
+                return false;
+        return true;
+    }
+
+    /// <summary>
     /// Forces a measure + arrange pass so the element has a non-zero <c>RenderSize</c>
     /// even if it was just created or is detached from a live visual tree. No-op for an
     /// already-arranged element with a valid layout.
@@ -319,6 +366,123 @@ public sealed partial class WpfUiAdapter
         var name = element.Name;
         var typeName = element.GetType().Name;
         return string.IsNullOrEmpty(name) ? typeName : $"{typeName}#{name}";
+    }
+
+    // -------------------------------------------------------------- GDI capture
+
+    private const uint PW_CLIENTONLY = 0x00000001;
+    private const uint PW_RENDERFULLCONTENT = 0x00000002;
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct RECT { public int Left, Top, Right, Bottom; }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool PrintWindow(IntPtr hWnd, IntPtr hdcBlt, uint nFlags);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr hWnd);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr hWnd, IntPtr hDC);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int w, int h);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern IntPtr SelectObject(IntPtr hdc, IntPtr h);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr ho);
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")] private static extern bool DeleteDC(IntPtr hdc);
+
+    /// <summary>
+    /// Captures the host window's actual client pixels via <c>PrintWindow</c>
+    /// (<c>PW_RENDERFULLCONTENT</c>, which grabs the DWM-composited surface) and crops to
+    /// <paramref name="element"/> (the whole client area for a <see cref="Window"/>). Reads the
+    /// real on-screen pixels through GDI rather than WPF's render target, so it works at any
+    /// render tier — the robust fallback when <see cref="RenderTargetBitmap"/> yields blank.
+    /// </summary>
+    private bool TryRenderViaGdi(FrameworkElement element, int maxDimension, out byte[] png, out string error)
+    {
+        png = Array.Empty<byte>();
+        error = string.Empty;
+
+        var window = element as Window ?? Window.GetWindow(element);
+        if (window is null) { error = "GDI capture: element has no host Window."; return false; }
+
+        var hwnd = new System.Windows.Interop.WindowInteropHelper(window).Handle;
+        if (hwnd == IntPtr.Zero) { error = "GDI capture: the host Window has no native handle yet."; return false; }
+        if (!GetClientRect(hwnd, out var rc)) { error = "GDI capture: GetClientRect failed."; return false; }
+
+        int clientW = rc.Right - rc.Left, clientH = rc.Bottom - rc.Top;
+        if (clientW <= 0 || clientH <= 0) { error = "GDI capture: the window client area is empty."; return false; }
+
+        IntPtr screenDc = GetDC(IntPtr.Zero);
+        IntPtr memDc = CreateCompatibleDC(screenDc);
+        IntPtr hbmp = CreateCompatibleBitmap(screenDc, clientW, clientH);
+        BitmapSource captured;
+        try
+        {
+            var prev = SelectObject(memDc, hbmp);
+            var ok = PrintWindow(hwnd, memDc, PW_CLIENTONLY | PW_RENDERFULLCONTENT);
+            SelectObject(memDc, prev);
+            if (!ok) { error = "GDI capture: PrintWindow returned false."; return false; }
+
+            // GDI bitmaps carry no meaningful alpha; convert to opaque Bgr24 so the encoded PNG
+            // is not silently fully transparent.
+            var raw = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
+                hbmp, IntPtr.Zero, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
+            captured = new FormatConvertedBitmap(raw, PixelFormats.Bgr24, null, 0);
+            captured.Freeze();
+        }
+        finally
+        {
+            DeleteObject(hbmp);
+            DeleteDC(memDc);
+            ReleaseDC(IntPtr.Zero, screenDc);
+        }
+
+        // A real window is never a single flat colour. A uniform capture means the window
+        // isn't being rendered to a capturable surface here (Tier-0 software rasterizer with no
+        // DWM/display surface) — fail honestly rather than emit a deceptive solid-colour PNG.
+        if (IsUniform(captured))
+        {
+            error =
+                "GDI PrintWindow captured a uniform (blank) image: this window is not rendered to a " +
+                "capturable surface in this session (Tier-0 software rasterizer / no DWM/display surface). " +
+                "On a normal interactive desktop the capture contains the real UI.";
+            return false;
+        }
+
+        // DIP -> device-pixel scale, for cropping the element's bounds out of the capture.
+        double sx = 1, sy = 1;
+        if (System.Windows.PresentationSource.FromVisual(window)?.CompositionTarget is { } ct)
+        {
+            sx = ct.TransformToDevice.M11;
+            sy = ct.TransformToDevice.M22;
+        }
+
+        BitmapSource result = captured;
+        if (element is not Window)
+        {
+            Rect b;
+            try { b = element.TransformToAncestor(window).TransformBounds(new Rect(element.RenderSize)); }
+            catch (Exception ex) { error = $"GDI capture: could not map '{Describe(element)}' into the window ({ex.Message})."; return false; }
+
+            int x = (int)Math.Round(b.X * sx), y = (int)Math.Round(b.Y * sy);
+            int w = (int)Math.Round(b.Width * sx), h = (int)Math.Round(b.Height * sy);
+            x = Math.Max(0, Math.Min(x, clientW - 1));
+            y = Math.Max(0, Math.Min(y, clientH - 1));
+            w = Math.Max(1, Math.Min(w, clientW - x));
+            h = Math.Max(1, Math.Min(h, clientH - y));
+            result = new CroppedBitmap(captured, new Int32Rect(x, y, w, h));
+        }
+
+        var max = maxDimension > 0 ? maxDimension : _defaultMaxDimension;
+        var largest = Math.Max(result.PixelWidth, result.PixelHeight);
+        if (largest > max)
+        {
+            var s = (double)max / largest;
+            result = new TransformedBitmap(result, new ScaleTransform(s, s));
+        }
+
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(result));
+        using var ms = new MemoryStream();
+        encoder.Save(ms);
+        png = ms.ToArray();
+        return true;
     }
 
     // ------------------------------------------------------------- diagnostics
