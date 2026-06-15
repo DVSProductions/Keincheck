@@ -1,17 +1,17 @@
-# AvaloniaMcp v2 — Stage 2 (the BROKER) Contracts
+# Keincheck v2 — Stage 2 (the BROKER) Contracts
 
 This is the **ground truth** for the Phase-B Hub agents and the Client/Connect
 finishers. Everything below is copied from the **built, green** solution (8 projects:
 6 product + 2 test; `dotnet build` clean, `dotnet test` 94 pass / 1 skip). The three
 uncertain MCP-SDK mechanics are **proven by running spikes**, not just compiled
-(`tests/AvaloniaMcp.Tests/Stage2SpikeTests.cs`, 2/2 pass). Code against these exact
+(`tests/Keincheck.Tests/Stage2SpikeTests.cs`, 2/2 pass). Code against these exact
 symbols; if you need a new member, ask the Foundation agent.
 
 Stage-1 substrate is unchanged — see `CONTRACTS_V2.md` for `FrameCodec`,
 `MessageEnvelope`/DTOs, `IUiAdapter`, `ControlRegistry`, the 22 `[McpServerTool]`s.
 
 > **Root path note:** the solution lives at
-> `M:\OneDrive\Programmieren\C#\AvaloniaMcp\AvaloniaMcp.sln`. (The task brief's
+> `M:\OneDrive\Programmieren\C#\Keincheck\Keincheck.sln`. (The task brief's
 > `undefined\…` placeholders resolve to this directory.)
 
 ---
@@ -20,9 +20,9 @@ Stage-1 substrate is unchanged — see `CONTRACTS_V2.md` for `FrameCodec`,
 
 | Assembly                | TFM     | OutputType | References (new)                                                                 |
 |-------------------------|---------|------------|---------------------------------------------------------------------------------|
-| **AvaloniaMcp.Client**  | net8.0  | library    | → Core, → Protocol, `Microsoft.Extensions.DependencyInjection` 8.0.1. **No ASP.NET.** |
-| **AvaloniaMcp.Hub**     | net10.0 | WinExe     | → Protocol, `ModelContextProtocol.AspNetCore` 1.4.0, Avalonia.Desktop/Themes.Fluent 12.0.4, Velopack 0.0.1298, `FrameworkReference Microsoft.AspNetCore.App`, `<RollForward>Major</RollForward>`. **Does NOT reference Core/Avalonia-introspection.** |
-| **AvaloniaMcp.Connect** | net8.0  | Exe (`avalonia-mcp-connect`) | → Protocol only. No MCP SDK ref (pure byte-pump). |
+| **Keincheck.Client**  | net8.0  | library    | → Core, → Protocol, `Microsoft.Extensions.DependencyInjection` 8.0.1. **No ASP.NET.** |
+| **Keincheck.Hub**     | net10.0 | WinExe     | → Protocol, `ModelContextProtocol.AspNetCore` 1.4.0, Avalonia.Desktop/Themes.Fluent 12.0.4, Velopack 0.0.1298, `FrameworkReference Microsoft.AspNetCore.App`, `<RollForward>Major</RollForward>`. **Does NOT reference Core/Avalonia-introspection.** |
+| **Keincheck.Connect** | net8.0  | Exe (`keincheck-connect`) | → Protocol only. No MCP SDK ref (pure byte-pump). |
 
 SDK facts (ModelContextProtocol **1.4.0**, verified by reflection):
 - `IMcpServerBuilder` is in namespace **`Microsoft.Extensions.DependencyInjection`**.
@@ -37,21 +37,21 @@ SDK facts (ModelContextProtocol **1.4.0**, verified by reflection):
 
 ## 1. Shared pipe transport (in **Protocol**, BCL-only, zero new deps)
 
-### Well-known names — `AvaloniaMcp.Protocol.PipeNames`
+### Well-known names — `Keincheck.Protocol.PipeNames`
 
 ```csharp
 public static class PipeNames
 {
     public static string UserScope           { get; } // sanitized Environment.UserName
-    public static string ControlPipe         { get; } // "AvaloniaMcp.{user}"  — hub control pipe
-    public static string SingleInstanceMutex { get; } // "Global\\AvaloniaMcp.Hub.{user}"
-    public static string McpSessionPipe(string token); // "AvaloniaMcp.mcp.{user}.{token}"
+    public static string ControlPipe         { get; } // "Keincheck.{user}"  — hub control pipe
+    public static string SingleInstanceMutex { get; } // "Global\\Keincheck.Hub.{user}"
+    public static string McpSessionPipe(string token); // "Keincheck.mcp.{user}.{token}"
 }
 ```
 
 Pass the **bare** name to `NamedPipe*Stream` — the BCL prepends `\\.\pipe\`.
 
-### `AvaloniaMcp.Protocol.PipeChannel` — message-oriented duplex over a Stream
+### `Keincheck.Protocol.PipeChannel` — message-oriented duplex over a Stream
 
 ```csharp
 public sealed class PipeChannel : IAsyncDisposable, IDisposable
@@ -70,7 +70,7 @@ Internally: `JsonSerializer.SerializeToUtf8Bytes(envelope, ProtocolJson.Options)
 `FrameCodec.WriteAsync`; reads do the reverse. Writes are serialized by a semaphore so
 concurrent senders never interleave chunks.
 
-### `AvaloniaMcp.Protocol.PipeTransport` — connect/accept helpers
+### `Keincheck.Protocol.PipeTransport` — connect/accept helpers
 
 ```csharp
 public static class PipeTransport
@@ -111,13 +111,13 @@ On non-Windows the BCL maps to a UDS under temp (best-effort; Windows is the liv
   satisfies the context shape; the SDK resolves DI from `options.Services`, captured at
   tool creation — **so a live connection is NOT required to invoke.**
 
-### Public surface — `AvaloniaMcp.Client`
+### Public surface — `Keincheck.Client`
 
 ```csharp
 public sealed class ClientToolHost : IDisposable
 {
     public static ClientToolHost Build(Avalonia.Application app,
-        AvaloniaMcp.Core.McpServerOptions options, params Assembly[] additionalToolAssemblies);
+        Keincheck.Core.McpServerOptions options, params Assembly[] additionalToolAssemblies);
     public IReadOnlyDictionary<string, McpServerTool> Tools { get; }
     public IReadOnlyList<ToolDescriptor> Describe();                    // -> ToolListMessage.Tools
     public Task<CallToolResult> InvokeAsync(string toolName, JsonElement? argumentsJson, CancellationToken ct = default);
@@ -144,14 +144,14 @@ public sealed class McpClientOptions
     public TimeSpan ConnectTimeout = TimeSpan.FromSeconds(30);
     public TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(5);
     public bool    AutoReconnect = true;
-    public AvaloniaMcp.Core.McpServerOptions? CoreOptions;
+    public Keincheck.Core.McpServerOptions? CoreOptions;
 }
 ```
 
 ### App entry point + run loop
 
 ```csharp
-namespace AvaloniaMcp.Client;
+namespace Keincheck.Client;
 public static class AppBuilderClientExtensions {
     public static AppBuilder UseMcpClient(this AppBuilder builder, Action<McpClientOptions>? configure = null);
 }
@@ -191,7 +191,7 @@ from `tool.ProtocolTool.Annotations` instead of the name heuristic in
   `IDictionary<string, JsonElement>`; `CallToolResult.Content` is `IList<ContentBlock>`,
   `TextContentBlock { string Text }`, `ImageContentBlock.FromBytes(ReadOnlyMemory<byte>, string mimeType)`.
 
-### Public surface — `AvaloniaMcp.Hub`
+### Public surface — `Keincheck.Hub`
 
 ```csharp
 public sealed class HubMcpServer : IAsyncDisposable
@@ -206,7 +206,7 @@ public sealed class HubOptions
     public int     HttpPort = 3100;        // loopback only
     public bool    ServeMcpOverPipe = true;
     public string? PipeName;               // default PipeNames.ControlPipe
-    public string  ServerName = "AvaloniaMcp.Hub";
+    public string  ServerName = "Keincheck.Hub";
     public string  ServerVersion = "0.1.0";
     public TimeSpan InvokeTimeout = TimeSpan.FromSeconds(60);
     public bool    QualifyToolNames;       // false => active client's names passed through verbatim
@@ -235,7 +235,7 @@ Test client side (also SDK): `new StreamClientTransport(serverInput, serverOutpu
 + `await McpClient.CreateAsync(transport, clientOptions: null, loggerFactory: null, ct)`
 → `initialize` + `ListToolsAsync()` + `CallToolAsync(name, args, ct)` all flow end to end.
 
-### Hub side — `AvaloniaMcp.Hub.HubPipeMcpListener`
+### Hub side — `Keincheck.Hub.HubPipeMcpListener`
 
 ```csharp
 public sealed class HubPipeMcpListener : IAsyncDisposable
@@ -250,12 +250,12 @@ Each accepted pipe connection gets its own `StreamServerTransport` + `McpServer`
 with `hub.ConfigureMcp(...)` (the same handlers as HTTP). `RunMcpOverStreamAsync` is
 public so it can be driven over an in-memory `Pipe` pair in tests.
 
-### Shim — `AvaloniaMcp.Connect` (exe `avalonia-mcp-connect`)
+### Shim — `Keincheck.Connect` (exe `keincheck-connect`)
 
 Args: `--pipe <name>` (default `PipeNames.McpSessionPipe("default")`),
 `--hub-exe <path>`. Flow: `EnsureHubRunningAsync` (single-instance mutex
 `PipeNames.SingleInstanceMutex` via `Mutex.TryOpenExisting`; launches the hub exe if
-absent — co-located `AvaloniaMcp.Hub.exe` by default) → `PipeTransport.ConnectAsync`
+absent — co-located `Keincheck.Hub.exe` by default) → `PipeTransport.ConnectAsync`
 → byte-pump `stdin→pipe` / `pipe→stdout`. **All logs to stderr; stdout is MCP-only.**
 
 > **Phase-B alignment:** the spike's `HubPipeMcpListener` accepts on a single pipe name.
@@ -270,7 +270,7 @@ absent — co-located `AvaloniaMcp.Hub.exe` by default) → `PipeTransport.Conne
 ## 5. Hub-internal contract (shared by the two Hub agents)
 
 ```csharp
-namespace AvaloniaMcp.Hub;
+namespace Keincheck.Hub;
 
 public interface IClientBroker
 {
@@ -321,11 +321,11 @@ status window; Phase-B = tray UI + audit log + read-only toggles + "AI driving X
 ## 6. End-to-end wire flow (for reference)
 
 ```
-AI MCP client → spawns avalonia-mcp-connect (stdio)
+AI MCP client → spawns keincheck-connect (stdio)
   └─ ensures hub up (mutex) → connects hub MCP-over-pipe → byte-pumps stdio<->pipe
 Hub (single MCP server): meta-tools + proxy of ACTIVE client's tools (verbatim schemas)
   └─ tools/call → IClientBroker.InvokeOnClientAsync → InvokeTool over ControlPipe
-App (embeds AvaloniaMcp.Client, NO ASP.NET):
+App (embeds Keincheck.Client, NO ASP.NET):
   └─ Register + ToolList(Describe()) → receive InvokeTool → ClientToolHost.InvokeAsync
      (Core tool on UI thread) → ToolResult(content blocks) → hub → AI
 ```

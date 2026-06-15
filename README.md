@@ -1,11 +1,11 @@
-# AvaloniaMcp
+# Keincheck
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/DVSProductions/AvaloniaMcp?include_prereleases&sort=semver)](https://github.com/DVSProductions/AvaloniaMcp/releases)
+[![Release](https://img.shields.io/github/v/release/DVSProductions/Keincheck?include_prereleases&sort=semver)](https://github.com/DVSProductions/Keincheck/releases)
 ![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%2010.0-512BD4)
 ![Avalonia](https://img.shields.io/badge/Avalonia-12-7B3FE4)
 
-**Let an AI see and drive any [Avalonia](https://avaloniaui.net) app.** AvaloniaMcp
+**Let an AI see and drive any [Avalonia](https://avaloniaui.net) app.** Keincheck
 exposes a [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server over
 your running Avalonia 12 UI — list windows, walk the visual/logical tree, read and
 write control properties, invoke controls through UI Automation, send synthetic input,
@@ -16,18 +16,18 @@ Two deployment models share one introspection engine:
 | | **Broker** (recommended) | **Embedded** |
 |---|---|---|
 | Server | A standalone **Hub** daemon — one MCP server for many apps | One MCP server **inside** your app |
-| Your app pulls in | `AvaloniaMcp.Client` (named-pipe, **no ASP.NET**) | `AvaloniaMcp` (Kestrel in-process) |
+| Your app pulls in | `Keincheck.Client` (named-pipe, **no ASP.NET**) | `Keincheck` (Kestrel in-process) |
 | Transport to the AI | stdio shim → hub (auto-starts the hub) | loopback HTTP `http://127.0.0.1:3001` |
 | Extras | launch/restart apps, multi-app routing, tray + audit + read-only toggle | none — zero infrastructure |
 | Use when | you want a clean, reusable, multi-app setup | you want a single app wired in one line |
 
 ## Quick start — broker
 
-1. **Install the Hub** from the [latest release](https://github.com/DVSProductions/AvaloniaMcp/releases)
+1. **Install the Hub** from the [latest release](https://github.com/DVSProductions/Keincheck/releases)
    (a self-updating [Velopack](https://velopack.io) app).
 2. **Add the client** to your Avalonia app and give it a stable id:
    ```csharp
-   using AvaloniaMcp.Client;
+   using Keincheck.Client;
 
    AppBuilder.Configure<App>()
        .UsePlatformDetect()
@@ -35,7 +35,7 @@ Two deployment models share one introspection engine:
    ```
 3. **Point your MCP client at the stdio shim** — e.g. a project `.mcp.json`:
    ```json
-   { "mcpServers": { "avaloniamcp-hub": { "type": "stdio", "command": "avalonia-mcp-connect" } } }
+   { "mcpServers": { "keincheck-hub": { "type": "stdio", "command": "keincheck-connect" } } }
    ```
    The shim ensures the hub is running and bridges stdio ↔ hub.
 4. **Drive it:** `hub_list_clients` → `hub_select_client("myapp#1")` → then the per-app
@@ -57,11 +57,11 @@ Point any MCP-capable client at `http://127.0.0.1:3001`.
    AI client (Claude Code / Desktop)
         │ stdio (MCP)
    ┌────▼───────────────┐  ensures-up / launches
-   │ avalonia-mcp-connect │  (stdio shim)
+   │ keincheck-connect │  (stdio shim)
    └────┬───────────────┘
         │ MCP over a named pipe
    ┌────▼──────────────────────────────────────────┐
-   │ AvaloniaMcp.Hub  (Velopack daemon, tray)       │
+   │ Keincheck.Hub  (Velopack daemon, tray)       │
    │  • MCP server: meta-tools + proxy of active app│
    │  • named-pipe broker  • registry + launcher    │
    │  • audit log • per-app read-only toggle         │
@@ -69,7 +69,7 @@ Point any MCP-capable client at `http://127.0.0.1:3001`.
         │ named pipe            │ named pipe
    ┌────▼─────────┐        ┌────▼─────────┐
    │ Your app     │        │ Another app  │   apps embed
-   │ +UseMcpClient│        │ +UseMcpClient│   AvaloniaMcp.Client
+   │ +UseMcpClient│        │ +UseMcpClient│   Keincheck.Client
    └──────────────┘        └──────────────┘
 ```
 
@@ -94,13 +94,13 @@ multiplexer that advertises the active client's tools and forwards calls over th
 
 | Project | TFM | Role |
 |---|---|---|
-| `AvaloniaMcp.Protocol` | net8.0 | Zero-dependency wire: named-pipe transport, chunked framing, message DTOs |
-| `AvaloniaMcp.Core` | net8.0 | Introspection engine + framework-agnostic `IUiAdapter` seam + the 22 tools |
-| `AvaloniaMcp.Client` | net8.0 | Thin client (`UseMcpClient`) — named-pipe, **no ASP.NET** |
-| `AvaloniaMcp.Hub` | net10.0 | The broker daemon: pipe server, registry, launcher/restart, MCP proxy, tray (Velopack) |
-| `AvaloniaMcp.Connect` | net8.0 | The stdio shim an MCP client spawns |
-| `AvaloniaMcp` | net8.0 | Embedded all-in-one server (`UseMcpServer`) |
-| `samples/AvaloniaMcp.Demo` | net10.0 | Demo Avalonia app wired as a client |
+| `Keincheck.Protocol` | net8.0 | Zero-dependency wire: named-pipe transport, chunked framing, message DTOs |
+| `Keincheck.Core` | net8.0 | Introspection engine + framework-agnostic `IUiAdapter` seam + the 22 tools |
+| `Keincheck.Client` | net8.0 | Thin client (`UseMcpClient`) — named-pipe, **no ASP.NET** |
+| `Keincheck.Hub` | net10.0 | The broker daemon: pipe server, registry, launcher/restart, MCP proxy, tray (Velopack) |
+| `Keincheck.Connect` | net8.0 | The stdio shim an MCP client spawns |
+| `Keincheck` | net8.0 | Embedded all-in-one server (`UseMcpServer`) |
+| `samples/Keincheck.Demo` | net10.0 | Demo Avalonia app wired as a client |
 | `tests/*` | net8.0 / net10.0 | xUnit + Avalonia.Headless |
 
 Libraries target **net8.0** for broad compatibility; the desktop/test apps target
@@ -109,8 +109,8 @@ Libraries target **net8.0** for broad compatibility; the desktop/test apps targe
 ## Build & test
 
 ```sh
-dotnet build AvaloniaMcp.sln
-dotnet test  AvaloniaMcp.sln
+dotnet build Keincheck.sln
+dotnet test  Keincheck.sln
 ```
 
 ## Releasing
@@ -126,14 +126,14 @@ git push origin v0.2.0
 Locally, the same flow is:
 
 ```sh
-dotnet publish AvaloniaMcp.Hub/AvaloniaMcp.Hub.csproj -c Release -r win-x64 --self-contained true -o publish
-vpk pack -u AvaloniaMcp.Hub -v 0.2.0 -p publish -e AvaloniaMcp.Hub.exe --packTitle "AvaloniaMcp Hub"
-vpk upload github --repoUrl https://github.com/DVSProductions/AvaloniaMcp --publish --releaseName "AvaloniaMcp Hub 0.2.0" --tag v0.2.0 --token <gh-token>
+dotnet publish Keincheck.Hub/Keincheck.Hub.csproj -c Release -r win-x64 --self-contained true -o publish
+vpk pack -u Keincheck.Hub -v 0.2.0 -p publish -e Keincheck.Hub.exe --packTitle "Keincheck Hub"
+vpk upload github --repoUrl https://github.com/DVSProductions/Keincheck --publish --releaseName "Keincheck Hub 0.2.0" --tag v0.2.0 --token <gh-token>
 ```
 
 ## Security
 
-AvaloniaMcp grants full programmatic control of an app's UI. It is designed for
+Keincheck grants full programmatic control of an app's UI. It is designed for
 **local, trusted** development and automation:
 
 - **Broker:** the control pipe is **current-user only**; the hub's MCP endpoint is bound to

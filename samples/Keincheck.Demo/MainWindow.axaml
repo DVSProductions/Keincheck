@@ -1,0 +1,80 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:Keincheck.Demo"
+        x:Class="Keincheck.Demo.MainWindow"
+        x:DataType="local:MainViewModel"
+        Width="720" Height="520"
+        Title="Keincheck Demo">
+
+  <!-- A small but representative test surface for the MCP tools. Every control
+       is Named so the selector engine can address it via #Name, and the standard
+       controls expose UI-Automation peers (Invoke/Toggle/Value/SelectionItem).
+       The VertexCanvas at the bottom is custom-drawn and exposes NO peer, so the
+       synthetic-input fallback has a real target. -->
+  <ScrollViewer>
+    <StackPanel Name="Root" Margin="16" Spacing="12">
+
+      <TextBlock Name="Heading"
+                 Text="Keincheck Demo"
+                 FontSize="22"
+                 FontWeight="SemiBold" />
+
+      <TextBlock Name="Status"
+                 Text="MCP server listening on http://127.0.0.1:3001"
+                 Opacity="0.7" />
+
+      <!-- Button: the click handler mutates a bound ViewModel property. -->
+      <StackPanel Orientation="Horizontal" Spacing="12">
+        <Button Name="CountButton"
+                Content="Increment"
+                Click="OnIncrementClick" />
+        <TextBlock Name="CountLabel"
+                   VerticalAlignment="Center"
+                   Text="{Binding ClickCount, StringFormat='Clicks: {0}'}" />
+      </StackPanel>
+
+      <!-- TextBox: two-way bound to Name. -->
+      <StackPanel Spacing="4">
+        <TextBlock Text="Name (TextBox, two-way):" Opacity="0.7" />
+        <TextBox Name="NameBox"
+                 Width="280"
+                 HorizontalAlignment="Left"
+                 Text="{Binding Name, Mode=TwoWay}" />
+      </StackPanel>
+
+      <!-- CheckBox: two-way bound to IsSubscribed. -->
+      <CheckBox Name="SubscribeCheck"
+                Content="Subscribed"
+                IsChecked="{Binding IsSubscribed, Mode=TwoWay}" />
+
+      <!-- ListBox: bound items + two-way selection. -->
+      <StackPanel Spacing="4">
+        <TextBlock Text="Items (ListBox):" Opacity="0.7" />
+        <ListBox Name="ItemsList"
+                 Height="120"
+                 ItemsSource="{Binding Items}"
+                 SelectedItem="{Binding SelectedItem, Mode=TwoWay}" />
+        <TextBlock Name="SelectionLabel"
+                   Opacity="0.7"
+                   Text="{Binding SelectedItem, StringFormat='Selected: {0}'}" />
+      </StackPanel>
+
+      <!-- Custom-drawn control with NO automation peer: drag the handles.
+           This is the synthetic-input fallback target. -->
+      <StackPanel Spacing="4">
+        <TextBlock Text="VertexCanvas (custom-drawn, no automation peer — drag the handles):"
+                   Opacity="0.7" />
+        <local:VertexCanvas Name="Vertices"
+                            Width="280"
+                            Height="220"
+                            HorizontalAlignment="Left" />
+      </StackPanel>
+
+      <TextBlock Name="MessageLabel"
+                 Opacity="0.7"
+                 Text="{Binding StatusMessage}" />
+
+    </StackPanel>
+  </ScrollViewer>
+
+</Window>

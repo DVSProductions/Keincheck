@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- NuGet package metadata -->
+    <PackageId>Keincheck.Protocol</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Keincheck</Authors>
+    <Description>IPC message DTOs and a length-prefixed, chunked framing codec for the Keincheck broker. Pure data + framing; zero dependencies (no Avalonia, no MCP).</Description>
+    <PackageTags>avalonia;mcp;ipc;protocol;framing</PackageTags>
+    <IncludeBuildOutput>true</IncludeBuildOutput>
+  </PropertyGroup>
+
+  <!--
+    INTENTIONALLY DEPENDENCY-FREE. This assembly is the wire contract the future
+    broker (Stage 2: Client/Hub/Connect) builds on. It must compile and unit-test
+    in isolation, so it references only the BCL (System.Text.Json ships in-box on
+    net8.0). Do NOT add Avalonia or ModelContextProtocol package references here.
+  -->
+
+</Project>

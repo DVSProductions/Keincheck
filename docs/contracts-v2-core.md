@@ -1,4 +1,4 @@
-# AvaloniaMcp v2 — Stage 1 Substrate Contracts
+# Keincheck v2 — Stage 1 Substrate Contracts
 
 This file is the **ground truth** for Phase-B and Stage-2 agents. Every signature
 below is copied verbatim from the **built, green** solution (5 projects, 24 tests
@@ -9,28 +9,28 @@ the Foundation agent — do not change these signatures unilaterally.
 
 | Assembly                 | TFM     | References                                                                 |
 |--------------------------|---------|----------------------------------------------------------------------------|
-| **AvaloniaMcp.Protocol** | net8.0  | **none** (BCL only — zero deps; this is the wire contract)                  |
-| **AvaloniaMcp.Core**     | net8.0  | Avalonia 12.0.4, ModelContextProtocol 1.4.0 (**core only**), → Protocol     |
-| **AvaloniaMcp**          | net8.0  | ModelContextProtocol.AspNetCore 1.4.0, FrameworkReference AspNetCore, → Core |
-| **AvaloniaMcp.Demo**     | net10.0 | Avalonia.Desktop/Fluent, → AvaloniaMcp                                       |
-| **AvaloniaMcp.Tests**    | net10.0 | Avalonia.Headless + xunit, → AvaloniaMcp, → Core, → Protocol                 |
+| **Keincheck.Protocol** | net8.0  | **none** (BCL only — zero deps; this is the wire contract)                  |
+| **Keincheck.Core**     | net8.0  | Avalonia 12.0.4, ModelContextProtocol 1.4.0 (**core only**), → Protocol     |
+| **Keincheck**          | net8.0  | ModelContextProtocol.AspNetCore 1.4.0, FrameworkReference AspNetCore, → Core |
+| **Keincheck.Demo**     | net10.0 | Avalonia.Desktop/Fluent, → Keincheck                                       |
+| **Keincheck.Tests**    | net10.0 | Avalonia.Headless + xunit, → Keincheck, → Core, → Protocol                 |
 
 - net10 consumers reference net8 libs via `<RollForward>Major</RollForward>`.
 - **Core does NOT reference** ModelContextProtocol.AspNetCore or the ASP.NET Core
-  shared framework. Hosting stays in **AvaloniaMcp**.
+  shared framework. Hosting stays in **Keincheck**.
 
 ## Namespace map (what moved in Stage 1)
 
 | Type                                                       | v1 namespace        | v2 namespace (now)        |
 |------------------------------------------------------------|---------------------|---------------------------|
-| `ControlRegistry`, `PropertyValueSerializer`, `UiDispatch` | `AvaloniaMcp`       | **`AvaloniaMcp.Core`**    |
-| `BindingErrorSink`, `McpServerOptions`                     | `AvaloniaMcp`       | **`AvaloniaMcp.Core`**    |
-| `SelectorChain`, `SimpleSelector` (internal)               | `AvaloniaMcp`       | **`AvaloniaMcp.Core`**    |
-| `IUiAdapter`, `AvaloniaUiAdapter` (NEW)                    | —                   | **`AvaloniaMcp.Core`**    |
-| `InspectionTools`/`ScreenshotTools`/`ActionTools`/`InputTools` | `AvaloniaMcp.Tools` | **`AvaloniaMcp.Core.Tools`** |
-| `McpHost`, `AppBuilderExtensions`                          | `AvaloniaMcp`       | **`AvaloniaMcp`** (unchanged) |
+| `ControlRegistry`, `PropertyValueSerializer`, `UiDispatch` | `Keincheck`       | **`Keincheck.Core`**    |
+| `BindingErrorSink`, `McpServerOptions`                     | `Keincheck`       | **`Keincheck.Core`**    |
+| `SelectorChain`, `SimpleSelector` (internal)               | `Keincheck`       | **`Keincheck.Core`**    |
+| `IUiAdapter`, `AvaloniaUiAdapter` (NEW)                    | —                   | **`Keincheck.Core`**    |
+| `InspectionTools`/`ScreenshotTools`/`ActionTools`/`InputTools` | `Keincheck.Tools` | **`Keincheck.Core.Tools`** |
+| `McpHost`, `AppBuilderExtensions`                          | `Keincheck`       | **`Keincheck`** (unchanged) |
 
-The **public `UseMcpServer` API is unchanged** (still in namespace `AvaloniaMcp`),
+The **public `UseMcpServer` API is unchanged** (still in namespace `Keincheck`),
 so the ProtoFace app that calls `.UseMcpServer()` still compiles untouched.
 
 The 22 `[McpServerTool]` methods now live in the **Core assembly**, so
@@ -38,12 +38,12 @@ The 22 `[McpServerTool]` methods now live in the **Core assembly**, so
 
 ---
 
-## 1. AvaloniaMcp.Protocol (zero-dependency wire substrate)
+## 1. Keincheck.Protocol (zero-dependency wire substrate)
 
 ### ProtocolVersion (handshake)
 
 ```csharp
-namespace AvaloniaMcp.Protocol;
+namespace Keincheck.Protocol;
 
 public static class ProtocolVersion
 {
@@ -57,7 +57,7 @@ public static class ProtocolVersion
 ### FrameCodec (length-prefixed, CHUNKED framing over a Stream)
 
 ```csharp
-namespace AvaloniaMcp.Protocol;
+namespace Keincheck.Protocol;
 
 public static class FrameCodec
 {
@@ -91,7 +91,7 @@ public sealed class ProtocolException : Exception { /* ctors */ }
 ### Messages (IPC DTOs) + envelope
 
 ```csharp
-namespace AvaloniaMcp.Protocol;
+namespace Keincheck.Protocol;
 
 public enum MessageKind { Unknown=0, Register=1, Heartbeat=2, ToolList=3,
                           InvokeTool=4, ToolResult=5, ClientDown=6 }
@@ -126,7 +126,7 @@ public static class ProtocolJson { public static readonly JsonSerializerOptions 
 
 ---
 
-## 2. AvaloniaMcp.Core — IUiAdapter (the framework-agnostic seam)
+## 2. Keincheck.Core — IUiAdapter (the framework-agnostic seam)
 
 Phase B reroutes **every** tool body through this interface. It is registered as a
 DI singleton by `McpHost` (`AddSingleton<IUiAdapter>(new AvaloniaUiAdapter(...))`),
@@ -135,7 +135,7 @@ members are UI-thread-affine (call inside `UiDispatch.Run`); the adapter does no
 re-marshal.
 
 ```csharp
-namespace AvaloniaMcp.Core;
+namespace Keincheck.Core;
 
 public interface IUiAdapter
 {
@@ -198,7 +198,7 @@ public readonly record struct UiAutomationResult(bool Ok, string? Action, string
 ### AvaloniaUiAdapter (the Avalonia 12 implementation)
 
 ```csharp
-namespace AvaloniaMcp.Core;
+namespace Keincheck.Core;
 
 public sealed class AvaloniaUiAdapter : IUiAdapter
 {
@@ -223,13 +223,13 @@ public sealed class AvaloniaUiAdapter : IUiAdapter
 
 ---
 
-## 3. AvaloniaMcp.Core — spine (moved verbatim, namespace `AvaloniaMcp.Core`)
+## 3. Keincheck.Core — spine (moved verbatim, namespace `Keincheck.Core`)
 
 Signatures are **unchanged from v1 CONTRACTS.md** — only the namespace moved from
-`AvaloniaMcp` to `AvaloniaMcp.Core`. They remain DI singletons registered by `McpHost`.
+`Keincheck` to `Keincheck.Core`. They remain DI singletons registered by `McpHost`.
 
 ```csharp
-namespace AvaloniaMcp.Core;
+namespace Keincheck.Core;
 
 public sealed class McpServerOptions {                      // DI singleton
     public int  Port                   { get; set; } = 3001;
@@ -283,10 +283,10 @@ Selector grammar is unchanged from v1 (`Type`, `Type[Name=x]`, `#Name`, `[Prop=v
 
 ---
 
-## 4. AvaloniaMcp — host (public API UNCHANGED, namespace `AvaloniaMcp`)
+## 4. Keincheck — host (public API UNCHANGED, namespace `Keincheck`)
 
 ```csharp
-namespace AvaloniaMcp;
+namespace Keincheck;
 
 public static class AppBuilderExtensions {
     // UNCHANGED public surface — ProtoFace's .UseMcpServer() still compiles.
@@ -312,7 +312,7 @@ plus the entry assembly.
 - Reroute each tool body to call `IUiAdapter` (+ `ControlRegistry` for resolution)
   instead of Avalonia directly. The interface above is **complete** for all 22 tools.
 - After rerouting, delete the now-duplicate `private static class SyntheticInput`
-  nested in `Core/Tools/InputTools.cs` (the shared `AvaloniaMcp.Core.SyntheticInput`
+  nested in `Core/Tools/InputTools.cs` (the shared `Keincheck.Core.SyntheticInput`
   the adapter uses replaces it).
 - Do not change `IUiAdapter`'s signatures; add members only via the Foundation agent.
 ```

@@ -1,7 +1,7 @@
 <Project>
   <!--
     This file deliberately does NOT import any parent Directory.Build.props.
-    It isolates the AvaloniaMcp solution from properties defined further up the
+    It isolates the Keincheck solution from properties defined further up the
     directory tree (e.g. a stray AvaloniaVersion=11.1.0). All Avalonia/MCP
     versions are pinned explicitly in the individual csproj files.
   -->
@@ -19,9 +19,9 @@
     <Version>0.1.0</Version>
     <Authors>Valentino Saitz</Authors>
     <Company>DVSProductions</Company>
-    <Product>AvaloniaMcp</Product>
-    <PackageProjectUrl>https://github.com/DVSProductions/AvaloniaMcp</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/DVSProductions/AvaloniaMcp.git</RepositoryUrl>
+    <Product>Keincheck</Product>
+    <PackageProjectUrl>https://github.com/DVSProductions/Keincheck</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/DVSProductions/Keincheck.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>

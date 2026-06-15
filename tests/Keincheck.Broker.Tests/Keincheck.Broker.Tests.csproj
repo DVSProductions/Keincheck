@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Matches the Protocol library's TFM: these IPC tests run the real pipe
+         transport + wire DTOs in isolation — no Avalonia, no MCP SDK, no UI thread.
+         The broker round-trip is proven over a genuine NamedPipe*Stream. -->
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- ONLY the Protocol assembly: the broker IPC contract (register, tool catalog,
+         invoke/result correlation, drop, restart, read-only) must pass or fail on the
+         real PipeChannel + Protocol DTOs alone, never on Core/host/Avalonia behaviour. -->
+    <ProjectReference Include="..\..\Keincheck.Protocol\Keincheck.Protocol.csproj" />
+  </ItemGroup>
+
+</Project>

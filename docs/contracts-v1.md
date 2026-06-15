@@ -1,11 +1,11 @@
-# AvaloniaMcp — Shared Spine Contracts
+# Keincheck — Shared Spine Contracts
 
 This file is the **ground truth** for module agents. Every signature below is
-copied verbatim from the built, green library (`AvaloniaMcp`, `net8.0`). Code
+copied verbatim from the built, green library (`Keincheck`, `net8.0`). Code
 your tool classes against these exact symbols. If you need a new spine member,
 ask the Foundation agent — do not change these signatures unilaterally.
 
-- Namespace for everything below: **`AvaloniaMcp`**
+- Namespace for everything below: **`Keincheck`**
 - Library target framework: **net8.0** (consumed by net10 Demo/Tests via `RollForward=Major`)
 - MCP packages: **ModelContextProtocol 1.4.0**, **ModelContextProtocol.AspNetCore 1.4.0**
 - Avalonia: **12.0.4** (the `Avalonia` metapackage)
@@ -15,7 +15,7 @@ ask the Foundation agent — do not change these signatures unilaterally.
 ## McpServerOptions
 
 ```csharp
-namespace AvaloniaMcp;
+namespace Keincheck;
 
 public sealed class McpServerOptions
 {
@@ -35,7 +35,7 @@ constructor/method parameter of type `McpServerOptions`.
 ## UiDispatch
 
 ```csharp
-namespace AvaloniaMcp;
+namespace Keincheck;
 
 public static class UiDispatch
 {
@@ -60,7 +60,7 @@ on the UI thread, the call executes synchronously (no deadlock).
 ## ControlRegistry
 
 ```csharp
-namespace AvaloniaMcp;
+namespace Keincheck;
 
 public sealed class ControlRegistry
 {
@@ -106,7 +106,7 @@ Whitespace-separated chain of simple selectors joined by combinators:
 ## PropertyValueSerializer
 
 ```csharp
-namespace AvaloniaMcp;
+namespace Keincheck;
 
 public sealed class PropertyValueSerializer
 {
@@ -143,7 +143,7 @@ enums/Avalonia value-structs become their string form, controls become
 ## BindingErrorSink
 
 ```csharp
-namespace AvaloniaMcp;
+namespace Keincheck;
 
 public sealed class BindingErrorSink : Avalonia.Logging.ILogSink
 {
@@ -173,7 +173,7 @@ the previously-installed sink.
 ## McpHost
 
 ```csharp
-namespace AvaloniaMcp;
+namespace Keincheck;
 
 public static class McpHost
 {
@@ -188,7 +188,7 @@ DI singletons registered by the host (available to tool methods as parameters):
 `Application`, `McpServerOptions`, `ControlRegistry`, `PropertyValueSerializer`,
 and `BindingErrorSink` (only when `CaptureBindingErrors` is true).
 
-Tools are discovered via `WithToolsFromAssembly` from **both** the `AvaloniaMcp`
+Tools are discovered via `WithToolsFromAssembly` from **both** the `Keincheck`
 library assembly **and** the entry assembly, so tool classes may live in either.
 
 ---
@@ -196,7 +196,7 @@ library assembly **and** the entry assembly, so tool classes may live in either.
 ## AppBuilderExtensions
 
 ```csharp
-namespace AvaloniaMcp;
+namespace Keincheck;
 
 public static class AppBuilderExtensions
 {
@@ -214,15 +214,15 @@ isn't assigned yet).
 ## Tool-class convention (module agents)
 
 Create one `[McpServerToolType]` **static** class per module under
-`AvaloniaMcp/Tools/`. Methods are `[McpServerTool]` + `[Description("…")]`.
+`Keincheck/Tools/`. Methods are `[McpServerTool]` + `[Description("…")]`.
 Dependencies arrive via DI **method parameters**.
 
 ```csharp
 using System.ComponentModel;                 // [Description]
 using ModelContextProtocol.Server;           // [McpServerToolType], [McpServerTool]
-using AvaloniaMcp;
+using Keincheck;
 
-namespace AvaloniaMcp.Tools;
+namespace Keincheck.Tools;
 
 [McpServerToolType]
 public static class ExampleTools

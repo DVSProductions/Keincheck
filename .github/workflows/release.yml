@@ -34,7 +34,7 @@ jobs:
 
       - name: Publish Hub (self-contained, win-x64)
         run: >
-          dotnet publish AvaloniaMcp.Hub/AvaloniaMcp.Hub.csproj
+          dotnet publish Keincheck.Hub/Keincheck.Hub.csproj
           -c Release -r win-x64 --self-contained true -o publish
 
       - name: Download prior releases (for delta packages)
@@ -43,14 +43,14 @@ jobs:
 
       - name: Pack
         run: >
-          vpk pack -u AvaloniaMcp.Hub -v ${{ steps.ver.outputs.version }}
-          -p publish -e AvaloniaMcp.Hub.exe
-          --packTitle "AvaloniaMcp Hub" --packAuthors "Valentino Saitz"
+          vpk pack -u Keincheck.Hub -v ${{ steps.ver.outputs.version }}
+          -p publish -e Keincheck.Hub.exe
+          --packTitle "Keincheck Hub" --packAuthors "Valentino Saitz"
 
       - name: Upload to GitHub release
         run: >
           vpk upload github --repoUrl https://github.com/${{ github.repository }}
           --publish --merge
-          --releaseName "AvaloniaMcp Hub ${{ steps.ver.outputs.version }}"
+          --releaseName "Keincheck Hub ${{ steps.ver.outputs.version }}"
           --tag ${{ github.ref_name }}
           --token ${{ secrets.GITHUB_TOKEN }}
