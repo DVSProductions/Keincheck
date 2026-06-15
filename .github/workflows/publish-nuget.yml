@@ -57,8 +57,14 @@ jobs:
           user: DVSProductions   # your nuget.org account username
 
       - name: Push to NuGet
-        run: >
-          dotnet nuget push "artifacts/nupkg/*.nupkg"
-          --source https://api.nuget.org/v3/index.json
-          --api-key "${{ steps.login.outputs.NUGET_API_KEY }}"
-          --skip-duplicate
+        # bash so the glob expands to real files — on the Windows runner the
+        # default pwsh shell passes the literal wildcard through and dotnet errors.
+        shell: bash
+        run: |
+          for pkg in artifacts/nupkg/*.nupkg; do
+            echo "pushing $pkg"
+            dotnet nuget push "$pkg" \
+              --source https://api.nuget.org/v3/index.json \
+              --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" \
+              --skip-duplicate
+          done
