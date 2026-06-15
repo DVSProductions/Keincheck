@@ -44,7 +44,7 @@ public static class SemanticTools
     /// states, bounds, children — optionally filtered to interactive controls only.
     /// </summary>
     [McpServerTool(Name = "get_semantic_tree"),
-     Description("Dump the ACCESSIBILITY (semantic) tree under a control/window (by handle or selector; default all top-levels): per node { id, role, name, value, interactive, states, bounds, children }. Filter to interactiveOnly to see just actionable controls. Depth/total-capped.")]
+     Description("Dump the ACCESSIBILITY (semantic) tree under a control/window (by handle or selector; default all top-levels): per node { id, role, name, value, interactive, states, bounds, children }. Filter to interactiveOnly to see just actionable controls. meaningfulOnly (default true) prunes pure template chrome (Track/Thumb/ContentPresenter/Border/Panel…). Depth/total-capped.")]
     public static async Task<object> GetSemanticTree(
         ControlRegistry registry,
         IUiAdapter ui,
@@ -52,7 +52,8 @@ public static class SemanticTools
         [Description("Control handle to root the walk at. Mutually exclusive with selector; takes priority.")] string? handle = null,
         [Description("Selector to root the walk at (first match). Omit both to walk every open top-level.")] string? selector = null,
         [Description("Maximum tree depth to descend. Default 12, hard max 64.")] int maxDepth = DefaultTreeDepth,
-        [Description("When true, emit only controls the adapter reports as interactive (clickable/editable/togglable). Default false.")] bool interactiveOnly = false) =>
+        [Description("When true, emit only controls the adapter reports as interactive (clickable/editable/togglable). Default false.")] bool interactiveOnly = false,
+        [Description("When true (default), drop pure template chrome (anonymous Track/Thumb/ContentPresenter/Border/Panel parts with no name/value/state). Set false for a full-fidelity dump.")] bool meaningfulOnly = true) =>
         await dispatcher.Run<object>(() =>
         {
             var depth = Math.Clamp(maxDepth <= 0 ? DefaultTreeDepth : maxDepth, 1, MaxTreeDepth);
@@ -78,7 +79,7 @@ public static class SemanticTools
             var budget = new NodeBudget(MaxNodes);
 
             var nodes = roots
-                .Select(r => BuildSemanticNode(registry, ui, r, depth, interactiveOnly, visited, budget))
+                .Select(r => BuildSemanticNode(registry, ui, r, depth, interactiveOnly, meaningfulOnly, visited, budget))
                 .Where(n => n is not null)
                 .ToArray();
 
@@ -87,6 +88,7 @@ public static class SemanticTools
                 ok = true,
                 rootCount = roots.Count,
                 interactiveOnly,
+                meaningfulOnly,
                 maxDepth = depth,
                 truncated = budget.Exhausted,
                 returned = nodes.Length,
@@ -169,7 +171,7 @@ public static class SemanticTools
             var depth = Math.Clamp(summaryDepth <= 0 ? DescribeMaxDepth : summaryDepth, 1, MaxTreeDepth);
             var visited = new HashSet<object>(ReferenceEqualityComparer.Instance);
             var budget = new NodeBudget(MaxNodes);
-            var summaryRoot = BuildSemanticNode(registry, ui, topLevel!, depth, interactiveOnly: false, visited, budget);
+            var summaryRoot = BuildSemanticNode(registry, ui, topLevel!, depth, interactiveOnly: false, meaningfulOnly: true, visited, budget);
 
             var summary = new
             {
@@ -238,6 +240,7 @@ public static class SemanticTools
         object control,
         int remainingDepth,
         bool interactiveOnly,
+        bool meaningfulOnly,
         HashSet<object> visited,
         NodeBudget budget)
     {
@@ -252,11 +255,13 @@ public static class SemanticTools
 
         var info = ui.GetSemanticInfo(control);
 
-        // When asked for interactive-only we still DESCEND through non-interactive
-        // containers (so nested buttons are reached), but we do not EMIT them. A
-        // non-interactive node is therefore replaced by its (flattened) interactive
-        // descendants rather than dropped wholesale.
-        var emit = !interactiveOnly || info.IsInteractive;
+        // Two orthogonal emit gates. interactiveOnly keeps only actionable controls;
+        // meaningfulOnly drops pure template chrome (anonymous Track/Thumb/ContentPresenter/
+        // Border/Panel parts the toolkit generates from a control template). Both still
+        // DESCEND through a dropped node and hoist its meaningful descendants up a level, so
+        // the tree stays connected rather than losing branches.
+        var emit = (!interactiveOnly || info.IsInteractive)
+                && (!meaningfulOnly || IsMeaningful(info));
 
         object?[] children;
         if (remainingDepth <= 1)
@@ -270,7 +275,7 @@ public static class SemanticTools
             {
                 if (budget.Exhausted)
                     break;
-                var node = BuildSemanticNode(registry, ui, child, remainingDepth - 1, interactiveOnly, visited, budget);
+                var node = BuildSemanticNode(registry, ui, child, remainingDepth - 1, interactiveOnly, meaningfulOnly, visited, budget);
                 if (node is not null)
                     collected.Add(node);
             }
@@ -304,6 +309,40 @@ public static class SemanticTools
             children,
         };
     }
+
+    /// <summary>
+    /// Whether a semantic node carries enough signal to be worth emitting (vs. pure template
+    /// chrome). Anything interactive, named, value-carrying, or stateful is always kept; an
+    /// otherwise-bare node is dropped only when its <see cref="UiSemanticInfo.Role"/> is a
+    /// known fallback template type name (a part the toolkit generated from a control
+    /// template, e.g. a Slider's <c>Track</c>/<c>Thumb</c> or an anonymous
+    /// <c>ContentPresenter</c>/<c>Border</c>/<c>Panel</c>). A chrome-roled element that was
+    /// given a name/value/state survives, so authored content is never lost.
+    /// </summary>
+    private static bool IsMeaningful(in UiSemanticInfo i)
+    {
+        if (i.IsInteractive) return true;                 // never drop a real control
+        if (!string.IsNullOrEmpty(i.Name)) return true;   // x:Name / accessible name
+        if (!string.IsNullOrEmpty(i.Value)) return true;  // carries text/value
+        if (i.States is { Count: > 0 }) return true;      // selected/checked/expanded/…
+        return !ChromeRoles.Contains(i.Role);             // else drop known chrome roles
+    }
+
+    /// <summary>
+    /// Pure-template / layout-chrome role names that appear ONLY as a fallback type-name role
+    /// (the element's framework type has no automation control type). When such a node also has
+    /// no name/value/state/interactivity it is template noise and is dropped by
+    /// <see cref="IsMeaningful"/>. Both adapters converge on these same fallback strings, so
+    /// the list lives in Core (framework-free) rather than on the seam.
+    /// </summary>
+    private static readonly HashSet<string> ChromeRoles = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Track", "Thumb", "RepeatButton", "DataValidationErrors", "ContentPresenter",
+        "Border", "Panel", "StackPanel", "Grid", "Canvas", "DockPanel", "WrapPanel",
+        "Decorator", "Viewbox", "TemplatedControl", "ScrollContentPresenter",
+        "ItemsPresenter", "Separator", "Rectangle", "Ellipse", "Path", "TextPresenter",
+        "LayoutTransformControl",
+    };
 
     /// <summary>
     /// The merged logical + visual control children of <paramref name="control"/>, in

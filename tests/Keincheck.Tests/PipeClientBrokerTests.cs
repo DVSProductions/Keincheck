@@ -168,6 +168,211 @@ public sealed class PipeClientBrokerTests
         try { await s2; } catch { }
     }
 
+    // ---- finding-1: auto-reselect on reconnect ----------------------------
+
+    [Fact]
+    public async Task Reconnect_Same_Id_Auto_Reclaims_Active_And_Fires_Update()
+    {
+        await using var broker = new PipeClientBroker(new BrokerOptions
+        {
+            HeartbeatTimeout = TimeSpan.FromSeconds(30),
+            WatchdogInterval = TimeSpan.FromHours(1),
+        }, KnownClientStore.Open(TempStorePath()));
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+
+        // Connect: the first client auto-becomes active. (Auto-activate runs in a second
+        // lock block AFTER the snapshot is published, so poll on ActiveClientId, not on
+        // ClientStatus, to avoid the tiny window between the two.)
+        var (c1, b1) = DuplexPair();
+        var s1 = broker.AcceptChannel(b1, cts.Token);
+        await c1.SendAsync(MessageKind.Register, new RegisterMessage
+        { ClientId = "app", ProcessId = 42, ProtocolVersion = ProtocolVersion.Current });
+        await WaitFor(() => broker.ActiveClientId == "app#1" ? "active" : null);
+        Assert.Equal("app#1", broker.ActiveClientId);
+
+        // Drop it. The broker observes the EOF, moves it to _seen, and clears _active while
+        // remembering it as the auto-reselect target.
+        await c1.DisposeAsync();
+        try { await s1; } catch { }
+        await WaitFor(() => broker.ActiveClientId is null ? "down" : null);
+        Assert.Null(broker.ActiveClientId);
+        Assert.DoesNotContain(broker.ListClients(), c => c.ClientId == "app#1");
+
+        // Watch for the re-activation nudge (ClientUpdated) the auto-reselect fires.
+        var reactivated = new TaskCompletionSource<ClientInfo>(TaskCreationOptions.RunContinuationsAsynchronously);
+        broker.ClientUpdated += (_, info) =>
+        {
+            if (info.ClientId == "app#1" && info.IsConnected)
+                reactivated.TrySetResult(info);
+        };
+
+        // Reconnect the SAME app/pid: it reclaims the same hub-id AND auto-becomes active.
+        var (c2, b2) = DuplexPair();
+        var s2 = broker.AcceptChannel(b2, cts.Token);
+        await c2.SendAsync(MessageKind.Register, new RegisterMessage
+        { ClientId = "app", ProcessId = 42, ProtocolVersion = ProtocolVersion.Current });
+
+        var info = await reactivated.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal("app#1", info.ClientId);
+        Assert.Equal("app#1", broker.ActiveClientId);
+
+        cts.Cancel();
+        await c2.DisposeAsync();
+        try { await s2; } catch { }
+    }
+
+    [Fact]
+    public async Task Manual_Selection_While_Down_Is_Not_Stolen_By_Reconnect()
+    {
+        await using var broker = new PipeClientBroker(new BrokerOptions
+        {
+            HeartbeatTimeout = TimeSpan.FromSeconds(30),
+            WatchdogInterval = TimeSpan.FromHours(1),
+        }, KnownClientStore.Open(TempStorePath()));
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+
+        // Two clients connect. A auto-activates (first in).
+        var (ca, ba) = DuplexPair();
+        var sa = broker.AcceptChannel(ba, cts.Token);
+        await ca.SendAsync(MessageKind.Register, new RegisterMessage
+        { ClientId = "alpha", ProcessId = 1, ProtocolVersion = ProtocolVersion.Current });
+        await WaitFor(() => broker.ClientStatus("alpha#1"));
+
+        var (cb, bb) = DuplexPair();
+        var sb = broker.AcceptChannel(bb, cts.Token);
+        await cb.SendAsync(MessageKind.Register, new RegisterMessage
+        { ClientId = "beta", ProcessId = 2, ProtocolVersion = ProtocolVersion.Current });
+        await WaitFor(() => broker.ClientStatus("beta#1"));
+
+        // Make alpha the deliberately-active client, then drop it.
+        broker.ActiveClientId = "alpha#1";
+        Assert.Equal("alpha#1", broker.ActiveClientId);
+        await ca.DisposeAsync();
+        try { await sa; } catch { }
+        await WaitFor(() => broker.ActiveClientId is null ? "down" : null);
+
+        // While alpha is down, the user manually selects beta.
+        broker.ActiveClientId = "beta#1";
+        Assert.Equal("beta#1", broker.ActiveClientId);
+
+        // alpha reconnects: it must NOT steal active back from the deliberate beta selection.
+        var (ca2, ba2) = DuplexPair();
+        var sa2 = broker.AcceptChannel(ba2, cts.Token);
+        await ca2.SendAsync(MessageKind.Register, new RegisterMessage
+        { ClientId = "alpha", ProcessId = 1, ProtocolVersion = ProtocolVersion.Current });
+        await WaitFor(() => broker.ListClients().Any(c => c.ClientId == "alpha#1") ? "back" : null);
+
+        // beta stays active despite alpha's reconnect.
+        Assert.Equal("beta#1", broker.ActiveClientId);
+
+        cts.Cancel();
+        await ca2.DisposeAsync();
+        await cb.DisposeAsync();
+        try { await sa2; } catch { }
+        try { await sb; } catch { }
+    }
+
+    // ---- finding-1: WaitForClientAsync ------------------------------------
+
+    [Fact]
+    public async Task WaitForClient_Returns_Immediately_When_Already_Connected()
+    {
+        await using var broker = new PipeClientBroker(new BrokerOptions
+        { WatchdogInterval = TimeSpan.FromHours(1) }, KnownClientStore.Open(TempStorePath()));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var (c, b) = DuplexPair();
+        var s = broker.AcceptChannel(b, cts.Token);
+        await c.SendAsync(MessageKind.Register, new RegisterMessage
+        { ClientId = "ready", ProcessId = 5, ProtocolVersion = ProtocolVersion.Current });
+        await WaitFor(() => broker.ClientStatus("ready#1"));
+
+        var info = await broker.WaitForClientAsync("ready", TimeSpan.FromSeconds(5), cts.Token);
+        Assert.NotNull(info);
+        Assert.Equal("ready#1", info!.ClientId);
+
+        cts.Cancel();
+        await c.DisposeAsync();
+        try { await s; } catch { }
+    }
+
+    [Fact]
+    public async Task WaitForClient_Blocks_Then_Resolves_On_Later_Connect()
+    {
+        await using var broker = new PipeClientBroker(new BrokerOptions
+        { WatchdogInterval = TimeSpan.FromHours(1) }, KnownClientStore.Open(TempStorePath()));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        // Start waiting BEFORE any client exists; the wait must block on the event.
+        var waitTask = broker.WaitForClientAsync("late", TimeSpan.FromSeconds(8), cts.Token);
+        Assert.False(waitTask.IsCompleted, "wait should block until the client connects");
+
+        var (c, b) = DuplexPair();
+        var s = broker.AcceptChannel(b, cts.Token);
+        await c.SendAsync(MessageKind.Register, new RegisterMessage
+        { ClientId = "late", ProcessId = 6, ProtocolVersion = ProtocolVersion.Current });
+
+        var info = await waitTask;
+        Assert.NotNull(info);
+        Assert.Equal("late#1", info!.ClientId);
+
+        cts.Cancel();
+        await c.DisposeAsync();
+        try { await s; } catch { }
+    }
+
+    [Fact]
+    public async Task WaitForClient_Times_Out_To_Null_When_None_Appears()
+    {
+        await using var broker = new PipeClientBroker(new BrokerOptions
+        { WatchdogInterval = TimeSpan.FromHours(1) }, KnownClientStore.Open(TempStorePath()));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var info = await broker.WaitForClientAsync("ghost", TimeSpan.FromMilliseconds(200), cts.Token);
+        Assert.Null(info);
+    }
+
+    // ---- finding-2: same-pid reconnect dedup ------------------------------
+
+    [Fact]
+    public async Task Reconnect_Same_Pid_Yields_A_Single_Live_Id()
+    {
+        await using var broker = new PipeClientBroker(new BrokerOptions
+        {
+            HeartbeatTimeout = TimeSpan.FromSeconds(30),
+            WatchdogInterval = TimeSpan.FromHours(1),
+        }, KnownClientStore.Open(TempStorePath()));
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+
+        // First registration of pid=20 -> twin#1.
+        var (c1, b1) = DuplexPair();
+        var s1 = broker.AcceptChannel(b1, cts.Token);
+        await c1.SendAsync(MessageKind.Register, new RegisterMessage
+        { ClientId = "twin", ProcessId = 20, ProtocolVersion = ProtocolVersion.Current });
+        await WaitFor(() => broker.ClientStatus("twin#1"));
+
+        // The SAME process re-registers (auto-reconnect storm) on a SECOND channel while the
+        // first session is still considered live: dedup must reuse twin#1, not mint twin#2.
+        var (c2, b2) = DuplexPair();
+        var s2 = broker.AcceptChannel(b2, cts.Token);
+        await c2.SendAsync(MessageKind.Register, new RegisterMessage
+        { ClientId = "twin", ProcessId = 20, ProtocolVersion = ProtocolVersion.Current });
+
+        // Give the supersede a moment to evict the stale session, then assert a single id.
+        await WaitFor(() => broker.ListClients().Count == 1 ? "one" : null);
+        var ids = broker.ListClients().Select(c => c.ClientId).ToList();
+        Assert.Equal(new[] { "twin#1" }, ids);
+
+        cts.Cancel();
+        await c1.DisposeAsync();
+        await c2.DisposeAsync();
+        try { await s1; } catch { }
+        try { await s2; } catch { }
+    }
+
     // ---- helpers ----------------------------------------------------------
 
     private static string TempStorePath()

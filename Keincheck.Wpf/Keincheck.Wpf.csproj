@@ -11,7 +11,7 @@
     <!-- NuGet package metadata -->
     <PackageId>Keincheck.Wpf</PackageId>
     <IsPackable>true</IsPackable>
-    <Version>0.4.0</Version>
+    <Version>0.5.0</Version>
     <Authors>Keincheck</Authors>
     <Description>The WPF implementation of the Keincheck neutral UI seam: WpfUiAdapter (IUiAdapter over System.Windows.*), WpfUiDispatcher (IUiDispatcher), and the UseKeincheckClient application integration — connects a WPF app to the Keincheck hub so an AI can see and drive its UI (visual/logical tree, properties, UI Automation, synthetic input, screenshots).</Description>
     <PackageTags>wpf;mcp;ai;automation;ui;introspection</PackageTags>

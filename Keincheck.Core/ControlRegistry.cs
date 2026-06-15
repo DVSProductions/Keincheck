@@ -19,6 +19,7 @@ namespace Keincheck.Core;
 /// Selector grammar (whitespace-separated combinator chain):
 /// <list type="bullet">
 ///   <item><c>Type</c> — matches by control type name (e.g. <c>Button</c>). Matches exact runtime type name or any base type name.</item>
+///   <item><c>.class</c> — matches by author style-class membership (e.g. <c>.toolGroup</c>); ordinal / case-sensitive. Combinable: <c>Type.class</c>, multi-class <c>.a.b</c> (requires all), and <c>.class[Name=x]</c>. Matches nothing on frameworks without style classes (e.g. WPF).</item>
 ///   <item><c>Type[Name=x]</c> — type plus a <c>Name</c> attribute equal to <c>x</c>.</item>
 ///   <item><c>#Name</c> — matches any control whose <c>Name</c> equals <c>Name</c>.</item>
 ///   <item><c>A B</c> — descendant combinator: <c>B</c> anywhere under <c>A</c>.</item>

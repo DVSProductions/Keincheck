@@ -53,10 +53,12 @@ public static class ActionTools
         ControlRegistry registry,
         IUiAdapter ui,
         IUiDispatcher dispatcher,
-        [Description("Control handle (e.g. \"ctl-1a\"). Mutually exclusive with selector; takes priority.")] string? handle,
-        [Description("CSS-ish selector that must resolve to exactly one control (used when handle is omitted).")] string? selector,
         [Description("Property name to set, e.g. \"Width\", \"Background\", \"Margin\", \"IsEnabled\".")] string propertyName,
-        [Description("New value as JSON (string/number/bool). Strings are coerced via TypeConverter/Parse, e.g. \"#FF0000\" or \"10,5,10,5\".")] JsonElement value)
+        [Description("New value as JSON (string/number/bool). Strings are coerced via TypeConverter/Parse, e.g. \"#FF0000\" or \"10,5,10,5\".")] JsonElement value,
+        // Optional discriminators: provide EXACTLY ONE of handle/selector. handle wins when both are given.
+        // They come last with a null default so MCP marks only propertyName/value required (mirrors get_property).
+        [Description("Optional control handle (e.g. \"ctl-1a\"). Provide exactly one of handle/selector; handle takes priority.")] string? handle = null,
+        [Description("Optional CSS-ish selector that must resolve to exactly one control (used when handle is omitted). Provide exactly one of handle/selector.")] string? selector = null)
     {
         if (string.IsNullOrWhiteSpace(propertyName))
             return Error("Property name is required.");
@@ -99,8 +101,8 @@ public static class ActionTools
         ControlRegistry registry,
         IUiAdapter ui,
         IUiDispatcher dispatcher,
-        [Description("Control handle (e.g. \"ctl-1a\"). Mutually exclusive with selector; takes priority.")] string? handle,
-        [Description("CSS-ish selector that must resolve to exactly one control (used when handle is omitted).")] string? selector,
+        [Description("Optional control handle (e.g. \"ctl-1a\"). Provide exactly one of handle/selector; handle takes priority.")] string? handle = null,
+        [Description("Optional CSS-ish selector that must resolve to exactly one control (used when handle is omitted). Provide exactly one of handle/selector.")] string? selector = null,
         [Description("Explicit action: Auto, Invoke, Toggle, SetValue, Expand, Collapse, Select. Default Auto.")] AutomationActionKind action = AutomationActionKind.Auto,
         [Description("Value for SetValue (or Auto on a value-capable control). Ignored otherwise.")] string? value = null)
     {
@@ -148,8 +150,8 @@ public static class ActionTools
         ControlRegistry registry,
         IUiAdapter ui,
         IUiDispatcher dispatcher,
-        [Description("Control handle (e.g. \"ctl-1a\"). Mutually exclusive with selector; takes priority.")] string? handle,
-        [Description("CSS-ish selector that must resolve to exactly one control (used when handle is omitted).")] string? selector)
+        [Description("Optional control handle (e.g. \"ctl-1a\"). Provide exactly one of handle/selector; handle takes priority.")] string? handle = null,
+        [Description("Optional CSS-ish selector that must resolve to exactly one control (used when handle is omitted). Provide exactly one of handle/selector.")] string? selector = null)
     {
         return await dispatcher.Run<object>(() =>
         {

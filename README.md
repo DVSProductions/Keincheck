@@ -93,7 +93,9 @@ client's tools and forwards calls over the pipe.
 `hub_restart_client`, `hub_select_client`, `hub_client_status`.
 
 **Addressing:** stable per-session handles (`ctl-1a`) plus a CSS-ish selector engine
-(`Button[Name=Save]`, `#Save`, `StackPanel > TextBox`).
+(`Button[Name=Save]`, `#Save`, `.toolGroup`, `Button.primary`, `StackPanel > TextBox`).
+The `.class` selector matches author style-class membership (Avalonia `Classes="…"`);
+frameworks without style classes match nothing.
 
 ## Projects
 

@@ -115,6 +115,15 @@ public sealed class RegisterMessage
     /// <summary>The protocol version the client speaks (for the handshake check).</summary>
     [JsonPropertyName("protocolVersion")]
     public int ProtocolVersion { get; set; } = Keincheck.Protocol.ProtocolVersion.Current;
+
+    /// <summary>
+    /// True if the client owns one or more top-level windows at registration time (it is
+    /// the UI-owning process). Lets the hub disambiguate the window-owner when one app
+    /// launch produces several registrants. Recomputed on each <see cref="ToolListMessage"/>
+    /// since windows usually open after startup. Defaults to false.
+    /// </summary>
+    [JsonPropertyName("ownsWindows")]
+    public bool OwnsWindows { get; set; }
 }
 
 /// <summary>
@@ -168,6 +177,14 @@ public sealed class ToolListMessage
     /// <summary>The tools, in catalog order.</summary>
     [JsonPropertyName("tools")]
     public IReadOnlyList<ToolDescriptor> Tools { get; set; } = Array.Empty<ToolDescriptor>();
+
+    /// <summary>
+    /// True if the client owns one or more top-level windows at the time this list was
+    /// sent. Recomputed on every tool-list so the hub's <c>ownsWindows</c> view stays
+    /// fresh as windows open after startup. Defaults to false.
+    /// </summary>
+    [JsonPropertyName("ownsWindows")]
+    public bool OwnsWindows { get; set; }
 }
 
 /// <summary>

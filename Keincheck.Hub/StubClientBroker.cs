@@ -91,6 +91,29 @@ public sealed class StubClientBroker : IClientBroker
         => throw new NotSupportedException("StubClientBroker cannot restart apps; Phase-B broker implements this.");
 
     /// <inheritdoc/>
+    public Task<ClientInfo?> WaitForClientAsync(
+        string? appIdOrClientId, TimeSpan timeout, CancellationToken cancellationToken = default)
+    {
+        // The stub does not run a pipe loop, so there is nothing to wait for: report the
+        // first already-connected match (or null). Tests drive connections via Upsert.
+        lock (_gate)
+        {
+            foreach (var c in _known.Values)
+            {
+                if (!c.IsConnected)
+                    continue;
+                if (string.IsNullOrWhiteSpace(appIdOrClientId)
+                    || string.Equals(c.ClientId, appIdOrClientId, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(c.AppId, appIdOrClientId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return Task.FromResult<ClientInfo?>(c);
+                }
+            }
+        }
+        return Task.FromResult<ClientInfo?>(null);
+    }
+
+    /// <inheritdoc/>
     public Task<ToolResultMessage> InvokeOnClientAsync(
         string clientId, string toolName, JsonElement? argumentsJson, CancellationToken cancellationToken = default)
     {

@@ -1,24 +1,28 @@
 namespace Keincheck.Core;
 
 /// <summary>
-/// One simple selector: an optional type constraint plus zero or more attribute
-/// predicates, or a bare <c>#Name</c> id selector. Matching is driven through
-/// <see cref="IUiAdapter"/> so the selector engine stays framework-free.
+/// One simple selector: an optional type constraint, zero or more style-class predicates
+/// (<c>.class</c>), and zero or more attribute predicates, or a bare <c>#Name</c> id
+/// selector. Matching is driven through <see cref="IUiAdapter"/> so the selector engine
+/// stays framework-free.
 /// </summary>
 internal sealed class SimpleSelector
 {
     private readonly string? _typeName;
+    private readonly IReadOnlyList<string> _classes;
     private readonly IReadOnlyList<(string Name, string Value)> _attributes;
 
-    private SimpleSelector(string? typeName, IReadOnlyList<(string, string)> attributes)
+    private SimpleSelector(string? typeName, IReadOnlyList<string> classes, IReadOnlyList<(string, string)> attributes)
     {
         _typeName = typeName;
+        _classes = classes;
         _attributes = attributes;
     }
 
     /// <summary>
     /// Parses a single simple-selector token, e.g. <c>Button</c>,
-    /// <c>TextBox[Name=user]</c>, <c>#submit</c>, or <c>[Name='a b']</c>.
+    /// <c>TextBox[Name=user]</c>, <c>#submit</c>, <c>.toolGroup</c>, <c>Button.primary</c>,
+    /// <c>.a.b</c>, <c>.primary[Name=Save]</c>, or <c>[Name='a b']</c>.
     /// </summary>
     public static SimpleSelector Parse(string token)
     {
@@ -32,39 +36,67 @@ internal sealed class SimpleSelector
             var name = token[1..];
             if (name.Length == 0)
                 throw new FormatException("'#' must be followed by a name");
-            return new SimpleSelector(null, new[] { ("Name", name) });
+            return new SimpleSelector(null, Array.Empty<string>(), new[] { ("Name", name) });
         }
 
         string? typeName = null;
+        var classes = new List<string>();
         var attrs = new List<(string, string)>();
 
+        // Split off the attribute tail ([...]) first; the head holds the optional type name
+        // and any .class segments (e.g. "Button.primary.big" or ".toolGroup").
         var bracket = token.IndexOf('[');
-        if (bracket < 0)
-        {
-            typeName = token;
-        }
-        else
-        {
-            if (bracket > 0)
-                typeName = token[..bracket];
+        var head = bracket < 0 ? token : token[..bracket];
+        if (bracket >= 0)
+            ParseAttributes(token[bracket..], attrs);
 
-            var rest = token[bracket..];
-            ParseAttributes(rest, attrs);
-        }
+        ParseHead(head, ref typeName, classes);
 
-        if (typeName is not null)
-        {
-            typeName = typeName.Trim();
-            if (typeName.Length == 0)
-                typeName = null;
-            else if (!IsValidIdentifier(typeName))
-                throw new FormatException($"invalid type name '{typeName}'");
-        }
-
-        if (typeName is null && attrs.Count == 0)
+        if (typeName is null && classes.Count == 0 && attrs.Count == 0)
             throw new FormatException($"simple selector '{token}' matches nothing");
 
-        return new SimpleSelector(typeName, attrs);
+        return new SimpleSelector(typeName, classes, attrs);
+    }
+
+    /// <summary>
+    /// Parses the pre-bracket head of a simple selector into an optional leading type name
+    /// followed by zero or more <c>.class</c> segments. A leading <c>.</c> means no type
+    /// constraint. Each class name is validated as an identifier (not treated as a type).
+    /// </summary>
+    private static void ParseHead(string head, ref string? typeName, List<string> classes)
+    {
+        head = head.Trim();
+        if (head.Length == 0)
+            return;
+
+        var dot = head.IndexOf('.');
+
+        // Leading type name (the run before the first '.'), if any.
+        if (dot != 0)
+        {
+            var name = (dot < 0 ? head : head[..dot]).Trim();
+            if (name.Length != 0)
+            {
+                if (!IsValidIdentifier(name))
+                    throw new FormatException($"invalid type name '{name}'");
+                typeName = name;
+            }
+        }
+
+        if (dot < 0)
+            return;
+
+        // Remaining '.'-separated class segments. A bare/empty segment (e.g. "." or "..")
+        // is malformed and throws (ControlRegistry.Query catches it to an empty result).
+        foreach (var seg in head[(dot + 1)..].Split('.'))
+        {
+            var cls = seg.Trim();
+            if (cls.Length == 0)
+                throw new FormatException($"empty class name in selector '{head}'");
+            if (!IsValidIdentifier(cls))
+                throw new FormatException($"invalid class name '{cls}'");
+            classes.Add(cls);
+        }
     }
 
     /// <summary>Tests whether <paramref name="element"/> satisfies this simple selector.</summary>
@@ -75,6 +107,18 @@ internal sealed class SimpleSelector
 
         if (_typeName is not null && !ui.MatchesType(element, _typeName))
             return false;
+
+        if (_classes.Count > 0)
+        {
+            // The element must carry EVERY requested class (ordinal, case-sensitive).
+            var present = ui.GetClasses(element);
+            var set = present as ICollection<string> ?? present.ToArray();
+            foreach (var cls in _classes)
+            {
+                if (!set.Contains(cls))
+                    return false;
+            }
+        }
 
         foreach (var (name, value) in _attributes)
         {

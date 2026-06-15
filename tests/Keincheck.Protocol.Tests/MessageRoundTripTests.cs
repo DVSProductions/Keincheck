@@ -41,6 +41,49 @@ public class MessageRoundTripTests
     }
 
     [Fact]
+    public void RegisterMessage_OwnsWindows_RoundTrips_And_Uses_Camel_Property()
+    {
+        // finding-2 Fix B: the client reports window-ownership on Register so the hub can
+        // surface ownsWindows without the AI probing each client with list_windows.
+        var on = new RegisterMessage
+        {
+            ClientId = "ui", ProcessId = 1, ProtocolVersion = ProtocolVersion.Current,
+            OwnsWindows = true,
+        };
+
+        var json = JsonSerializer.Serialize(on, ProtocolJson.Options);
+        Assert.Contains("\"ownsWindows\":true", json);
+        Assert.True(RoundTrip(on).OwnsWindows);
+
+        // Default is false and a defaulted register still round-trips to false.
+        var off = new RegisterMessage
+        {
+            ClientId = "worker", ProcessId = 2, ProtocolVersion = ProtocolVersion.Current,
+        };
+        Assert.False(off.OwnsWindows);
+        Assert.False(RoundTrip(off).OwnsWindows);
+    }
+
+    [Fact]
+    public void ToolListMessage_OwnsWindows_RoundTrips()
+    {
+        // ownsWindows is recomputed and resent on every ToolList (windows open after startup).
+        var msg = new ToolListMessage
+        {
+            ClientId = "ui",
+            OwnsWindows = true,
+            Tools = new[] { new ToolDescriptor { Name = "list_windows" } },
+        };
+
+        var json = JsonSerializer.Serialize(msg, ProtocolJson.Options);
+        Assert.Contains("\"ownsWindows\":true", json);
+
+        var back = RoundTrip(msg);
+        Assert.True(back.OwnsWindows);
+        Assert.Equal("list_windows", Assert.Single(back.Tools).Name);
+    }
+
+    [Fact]
     public void RegisterMessage_NullDisplayName_IsOmittedFromJson_And_RoundTrips()
     {
         var msg = new RegisterMessage

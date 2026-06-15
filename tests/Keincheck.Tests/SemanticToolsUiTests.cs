@@ -139,6 +139,110 @@ public sealed class SemanticToolsUiTests
         AssertEveryEmittedNodeIsInteractive(root.GetProperty("nodes"));
     }
 
+    // ---- get_semantic_tree meaningfulOnly (finding: chrome noise) ----------
+
+    /// <summary>
+    /// Builds a window whose Slider template materializes pure chrome parts
+    /// (Track/Thumb/RepeatButton) and whose TextBox brings a DataValidationErrors part,
+    /// alongside a named Button — the canonical "meaningful controls drowning in template
+    /// chrome" scenario the reviewer hit.
+    /// </summary>
+    private static Window ChromeHeavyWindow()
+    {
+        var panel = new StackPanel();
+        panel.Children.Add(new Button { Name = "Go", Content = "Go" });
+        panel.Children.Add(new Slider { Name = "Amount", Minimum = 0, Maximum = 10, Value = 3, Width = 120 });
+        panel.Children.Add(new TextBox { Name = "Field", Text = "hi" });
+        return new Window { Title = "Chrome Window", Width = 320, Height = 240, Content = panel };
+    }
+
+    // Known pure-template / chrome roles (a subset of Core's ChromeRoles) that the default
+    // meaningfulOnly prunes whenever they are anonymous. The exact parts a control template
+    // materializes depend on the (theme-less) headless app, so the assertions key on the SET
+    // DIFFERENCE between full and default rather than on any single named part.
+    private static readonly HashSet<string> ChromeRoleSamples = new(StringComparer.Ordinal)
+    {
+        "Track", "Thumb", "RepeatButton", "DataValidationErrors", "ContentPresenter",
+        "Border", "Panel", "StackPanel", "Grid", "Decorator", "TextPresenter",
+        "ScrollContentPresenter", "TemplatedControl",
+    };
+
+    private static (JsonElement def, JsonElement full) DefaultAndFullTrees(HeadlessSession session)
+    {
+        var (defaultJson, fullJson) = session.RunOnUiThread(() =>
+        {
+            var registry = new ControlRegistry();
+            IUiAdapter ui = NewAdapter();
+            IUiDispatcher dispatcher = NewDispatcher();
+
+            var window = ShowAndLayout(ChromeHeavyWindow());
+            try
+            {
+                var handle = registry.Assign(window);
+                var def = SemanticTools
+                    .GetSemanticTree(registry, ui, dispatcher, handle: handle)
+                    .GetAwaiter().GetResult();
+                var full = SemanticTools
+                    .GetSemanticTree(registry, ui, dispatcher, handle: handle, meaningfulOnly: false)
+                    .GetAwaiter().GetResult();
+                return (JsonSerializer.Serialize(def), JsonSerializer.Serialize(full));
+            }
+            finally { window.Close(); }
+        });
+
+        return (JsonDocument.Parse(defaultJson).RootElement.Clone(),
+                JsonDocument.Parse(fullJson).RootElement.Clone());
+    }
+
+    [Fact]
+    public void GetSemanticTree_MeaningfulOnly_Default_Drops_Template_Chrome()
+    {
+        var (defRoot, fullRoot) = DefaultAndFullTrees(_session);
+
+        // The default result advertises the mode.
+        Assert.True(defRoot.GetProperty("ok").GetBoolean());
+        Assert.True(defRoot.GetProperty("meaningfulOnly").GetBoolean());
+
+        var defRoles = CollectStrings(defRoot.GetProperty("nodes"), "role").ToHashSet(StringComparer.Ordinal);
+        var fullRoles = CollectStrings(fullRoot.GetProperty("nodes"), "role").ToHashSet(StringComparer.Ordinal);
+
+        // Meaningful, authored controls survive the default prune.
+        Assert.Contains("Button", defRoles);
+        Assert.Contains(defRoles, r => r is "Slider" or "ScrollBar");                 // the Slider control
+        Assert.Contains(defRoles, r => r is "Edit" or "TextBox");                     // the TextBox peer role
+
+        // At least one chrome role present in the FULL dump is dropped by the default prune.
+        var droppedChrome = fullRoles.Except(defRoles).Where(ChromeRoleSamples.Contains).ToList();
+        Assert.NotEmpty(droppedChrome);
+        // And no surviving default node is a bare/anonymous chrome part that the full dump shows.
+        foreach (var dropped in droppedChrome)
+            Assert.DoesNotContain(dropped, defRoles);
+    }
+
+    [Fact]
+    public void GetSemanticTree_MeaningfulOnly_False_Restores_Chrome_And_Returns_More()
+    {
+        var (defRoot, fullRoot) = DefaultAndFullTrees(_session);
+
+        Assert.False(fullRoot.GetProperty("meaningfulOnly").GetBoolean());
+
+        var defRoles = CollectStrings(defRoot.GetProperty("nodes"), "role").ToHashSet(StringComparer.Ordinal);
+        var fullRoles = CollectStrings(fullRoot.GetProperty("nodes"), "role").ToHashSet(StringComparer.Ordinal);
+
+        // With the escape hatch on, at least one chrome role reappears that the default dropped.
+        Assert.Contains(fullRoles, r => ChromeRoleSamples.Contains(r) && !defRoles.Contains(r));
+
+        // And the full dump EMITS strictly more real (role-bearing) nodes than the pruned
+        // default — substantiating the reviewer's "cut the payload substantially". We count
+        // role-bearing nodes (not the structural hoist wrappers a dropped-but-descendant-bearing
+        // chrome node leaves behind), since those wrappers keep the raw node count near-equal
+        // while the actual emitted control count drops.
+        var defEmitted = CollectStrings(defRoot.GetProperty("nodes"), "role").Count;
+        var fullEmitted = CollectStrings(fullRoot.GetProperty("nodes"), "role").Count;
+        Assert.True(fullEmitted > defEmitted,
+            $"meaningfulOnly:false should emit more role-bearing nodes (full={fullEmitted}, default={defEmitted})");
+    }
+
     // ---- screenshot_marked -------------------------------------------------
 
     [Fact]

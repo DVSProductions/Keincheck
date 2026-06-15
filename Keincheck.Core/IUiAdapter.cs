@@ -69,6 +69,20 @@ public interface IUiAdapter
     /// </summary>
     bool MatchesType(object element, string typeName);
 
+    /// <summary>
+    /// The author-declared style-class membership of <paramref name="element"/> (the
+    /// <c>.class</c> selector source) — e.g. an Avalonia <c>Classes="toolGroup primary"</c>
+    /// yields <c>["toolGroup", "primary"]</c>. Matching is ordinal / case-sensitive. Framework
+    /// pseudo-classes (e.g. <c>:pointerover</c>) are excluded; only author classes are returned.
+    /// </summary>
+    /// <remarks>
+    /// The default implementation returns an empty sequence, because the neutral layer has no
+    /// concept of style classes. Frameworks that expose one override this; frameworks without
+    /// style classes (e.g. WPF) inherit the empty default, so a <c>.class</c> selector simply
+    /// matches nothing there. UI-thread only.
+    /// </remarks>
+    IEnumerable<string> GetClasses(object element) => Array.Empty<string>();
+
     /// <summary>The element's <c>Name</c>, or <c>null</c> when unset/empty.</summary>
     string? GetName(object element);
 

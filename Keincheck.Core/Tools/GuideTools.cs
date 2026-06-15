@@ -79,6 +79,11 @@ nothing (it never throws).
 - `Type` — matches by control type name (e.g. `Button`). Matches the exact runtime type
   name **or any base type name** (so `Button` also matches a `ToggleButton`, `Control`
   matches any control).
+- `.class` — matches by **author style-class** membership (e.g. `.toolGroup` matches a
+  control declared `Classes="toolGroup"`). Ordinal / case-sensitive. Combine with a type
+  (`Button.primary`), chain classes to require all of them (`.a.b`), or add attributes
+  (`.primary[Name=Save]`). Frameworks without style classes (e.g. WPF) expose none, so
+  `.class` matches nothing there.
 - `Type[Name=x]` — a type plus a `Name` attribute equal to `x`.
 - `#Name` — any control whose `Name` equals `Name`.
 - `A B` — descendant combinator: `B` anywhere under `A`.
@@ -87,7 +92,8 @@ nothing (it never throws).
 Attribute predicates also accept `[Name=x]` standalone and quoting:
 `[Name='my value']` or `[Name="my value"]`.
 
-Examples: `Button[Name=Save]`, `#submit`, `StackPanel > TextBox`, `Window TextBox`.
+Examples: `Button[Name=Save]`, `#submit`, `.toolGroup`, `Button.primary`,
+`StackPanel > TextBox`, `Window TextBox`.
 
 Many tools take **either** `handle` **or** `selector`; when both are accepted the handle
 wins. For tools that need exactly one control (e.g. `get_properties`, `set_property`), a

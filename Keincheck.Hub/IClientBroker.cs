@@ -49,6 +49,24 @@ public interface IClientBroker
     Task<int> RestartClientAsync(string clientId, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Blocks until a connected client matching <paramref name="appIdOrClientId"/> is
+    /// available, then returns its snapshot. A null/empty filter resolves on the next
+    /// client to connect (or any already-connected one). Used by <c>hub_wait_for_client</c>
+    /// so the AI can launch/rebuild an app and block until its tools are back instead of
+    /// polling <see cref="ListClients"/>.
+    /// </summary>
+    /// <param name="appIdOrClientId">
+    /// The hub id (<c>AppId#n</c>) or bare app id to wait for; null/empty matches any client.
+    /// </param>
+    /// <param name="timeout">How long to wait before giving up.</param>
+    /// <returns>
+    /// The matching client's snapshot, or <c>null</c> if the timeout elapsed first. Resolves
+    /// immediately when a matching client is already connected.
+    /// </returns>
+    Task<ClientInfo?> WaitForClientAsync(
+        string? appIdOrClientId, TimeSpan timeout, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Forwards a tool call to the owning client over the pipe and awaits its
     /// <see cref="ToolResultMessage"/>. Throws if the client is not connected, the
     /// client is read-only and the tool mutates, or the call times out.
@@ -91,6 +109,14 @@ public sealed record ClientInfo
 
     /// <summary>True while a live pipe session exists for this client.</summary>
     public bool IsConnected { get; init; }
+
+    /// <summary>
+    /// True if this client currently owns one or more top-level windows (it is the
+    /// UI-owning process). Reported by the client on each tool-list and recomputed as
+    /// windows open after startup, so the AI can pick the window-owner among several
+    /// clients of the same app without probing each with <c>list_windows</c>.
+    /// </summary>
+    public bool OwnsWindows { get; init; }
 
     /// <summary>True if the hub or the client has marked this app read-only (mutating tools refused).</summary>
     public bool ReadOnly { get; init; }

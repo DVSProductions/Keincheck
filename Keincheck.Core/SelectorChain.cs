@@ -154,7 +154,10 @@ internal sealed class SelectorChain
     /// <summary>
     /// Splits a selector into combinator tokens. Whitespace separates simple
     /// selectors; a bare <c>&gt;</c> becomes its own token. Brackets and quotes are
-    /// kept intact so attribute values may contain spaces.
+    /// kept intact so attribute values may contain spaces. A <c>.</c> is NOT a
+    /// combinator — it falls through the default branch and stays attached to its
+    /// token (so <c>Button.primary</c> / <c>.a.b</c> survive as one token for
+    /// <see cref="SimpleSelector.Parse"/> to split into type + class predicates).
     /// </summary>
     private static List<string> Tokenize(string selector)
     {

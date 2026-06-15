@@ -256,6 +256,68 @@ public sealed class HubMetaToolTests
         finally { await TeardownAsync(client, hub, cts, serverTask); }
     }
 
+    // ---- finding-1 Fix 2: hub_wait_for_client meta-tool -------------------
+
+    [Fact]
+    public async Task Catalog_Advertises_WaitForClient_MetaTool()
+    {
+        // The meta-tool must surface in the advertised tools/list (exercises BuildCatalog +
+        // IsMetaTool through the real MCP surface, mirroring Catalog_Advertises_All_Six).
+        var broker = BrokerWithClient();
+        broker.ActiveClientId = "app1";
+        var (client, hub, cts, serverTask) = await ConnectAsync(broker);
+        try
+        {
+            var names = (await client.ListToolsAsync(cancellationToken: cts.Token))
+                .Select(t => t.Name).ToHashSet();
+            Assert.Contains("hub_wait_for_client", names);
+        }
+        finally { await TeardownAsync(client, hub, cts, serverTask); }
+    }
+
+    [Fact]
+    public async Task WaitForClient_Dispatches_And_Returns_Connected_When_Already_Up()
+    {
+        // The stub reports the first already-connected match, so a wait for an up client
+        // resolves immediately through the dispatch route.
+        var broker = BrokerWithClient(id: "app1", connected: true);
+        var (client, hub, cts, serverTask) = await ConnectAsync(broker);
+        try
+        {
+            var call = await client.CallToolAsync("hub_wait_for_client",
+                new Dictionary<string, object?> { ["clientId"] = "app1", ["timeoutMs"] = 1000 }!,
+                cancellationToken: cts.Token);
+
+            Assert.False(call.IsError ?? false);
+            var text = Assert.IsType<TextContentBlock>(Assert.Single(call.Content)).Text;
+            using var doc = JsonDocument.Parse(text);
+            Assert.True(doc.RootElement.GetProperty("connected").GetBoolean());
+            Assert.Equal("app1", doc.RootElement.GetProperty("clientId").GetString());
+        }
+        finally { await TeardownAsync(client, hub, cts, serverTask); }
+    }
+
+    [Fact]
+    public async Task WaitForClient_Dispatches_And_Times_Out_When_No_Match()
+    {
+        // No matching client -> the stub returns null -> the meta-tool reports a timeout result.
+        var broker = new StubClientBroker();
+        var (client, hub, cts, serverTask) = await ConnectAsync(broker);
+        try
+        {
+            var call = await client.CallToolAsync("hub_wait_for_client",
+                new Dictionary<string, object?> { ["clientId"] = "nobody", ["timeoutMs"] = 50 }!,
+                cancellationToken: cts.Token);
+
+            Assert.False(call.IsError ?? false);
+            var text = Assert.IsType<TextContentBlock>(Assert.Single(call.Content)).Text;
+            using var doc = JsonDocument.Parse(text);
+            Assert.False(doc.RootElement.GetProperty("connected").GetBoolean());
+            Assert.True(doc.RootElement.GetProperty("timedOut").GetBoolean());
+        }
+        finally { await TeardownAsync(client, hub, cts, serverTask); }
+    }
+
     private static ToolResultMessage EchoResult(string clientId, string toolName) => new()
     {
         ClientId = clientId,

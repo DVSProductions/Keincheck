@@ -67,6 +67,10 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     private Task? _acceptLoop;
     private Task? _watchdog;
     private string? _active;
+    // The hub-id that was active when it last disconnected. Lets a reconnecting client
+    // reclaim active automatically (finding-1) — but only while no other client has been
+    // made active in the meantime, so a deliberate manual selection is respected.
+    private string? _lastActive;
     private int _disposed;
 
     /// <summary>Creates the broker. Call <see cref="Start"/> to begin accepting clients.</summary>
@@ -209,10 +213,34 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
 
         ClientInfo info;
         LiveClient live;
+        LiveClient? supersededStale = null;
         lock (_gate)
         {
-            var hubId = ReserveSuffix(appId, preferred: NextFreeSuffix(appId));
-            var existingReadOnly = _seen.TryGetValue(hubId, out var prior) && prior.ReadOnly;
+            // Stale-reconnect dedup (finding-2 Fix A): if a live session for the SAME app
+            // and SAME process is already registered, this Register is that process
+            // re-registering (its client auto-reconnected before the old session's
+            // transport-close was observed). Reuse its hub-id and evict the stale session
+            // instead of minting a fresh suffix, so one process never piles up as #2/#3.
+            // Only when the pid is known (>0); an unknown pid falls back to a fresh slot.
+            string hubId;
+            if (reg.ProcessId > 0
+                && _live.Values.FirstOrDefault(c =>
+                       c.ProcessId == reg.ProcessId
+                       && string.Equals(c.AppId, appId, StringComparison.OrdinalIgnoreCase))
+                   is { } stale)
+            {
+                hubId = stale.ClientId;
+                supersededStale = stale;
+                _live.Remove(hubId); // the new LiveClient below takes the same id
+            }
+            else
+            {
+                hubId = ReserveSuffix(appId, preferred: NextFreeSuffix(appId));
+            }
+
+            var existingReadOnly =
+                (supersededStale?.ReadOnly ?? false)
+                || (_seen.TryGetValue(hubId, out var prior) && prior.ReadOnly);
             var profileReadOnly = _store.Get(appId)?.ReadOnly ?? false;
 
             live = new LiveClient(hubId, appId, channel)
@@ -223,12 +251,27 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
                 Arguments = args,
                 WorkingDirectory = cwd,
                 ReadOnly = existingReadOnly || profileReadOnly,
+                OwnsWindows = reg.OwnsWindows,
                 ConnectedAtUtc = DateTimeOffset.UtcNow,
             };
             live.Touch();
             _live[hubId] = live;
             _seen.Remove(hubId); // now live, not merely seen
             info = Snapshot_NoLock(live);
+        }
+
+        // Tear down the superseded session's transport so its receive loop unwinds. Its
+        // eventual finally{Disconnect} no-ops because Disconnect re-checks ReferenceEquals
+        // against the live entry, which now points at the NEW session that reclaimed the id.
+        if (supersededStale is not null)
+        {
+            try { supersededStale.Channel.Dispose(); } catch { /* already dead */ }
+            foreach (var kv in supersededStale.Pending)
+            {
+                if (supersededStale.Pending.TryRemove(kv.Key, out var tcs))
+                    tcs.TrySetException(new IOException(
+                        $"Client '{supersededStale.ClientId}' re-registered; superseding the prior session."));
+            }
         }
 
         // Persist the launch profile so this app can be relaunched later.
@@ -243,13 +286,20 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
             LastSeenUtc = DateTimeOffset.UtcNow,
         });
 
-        // First connected client auto-becomes active so the AI sees tools immediately.
+        // Auto-activate so the AI sees tools immediately, without a manual
+        // hub_select_client. Two cases, both gated on no client currently being active:
+        //   - the very first client this run (_lastActive is null), as before; or
+        //   - the SAME client that was active when it dropped reclaiming its slot
+        //     (finding-1 auto-reselect). A DIFFERENT client reconnecting must NOT steal
+        //     active away from a deliberate manual selection made while the first was
+        //     down — which is why we require live.ClientId == _lastActive here.
         var becameActive = false;
         lock (_gate)
         {
-            if (_active is null)
+            if (_active is null && (_lastActive is null || live.ClientId == _lastActive))
             {
                 _active = live.ClientId;
+                _lastActive = null; // consumed — don't re-steal on a later reconnect
                 becameActive = true;
             }
         }
@@ -271,6 +321,9 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
 
         client.Touch();
         client.Tools = list.Tools;
+        // Recompute window-ownership on every tool-list: a process whose windows open
+        // after startup only becomes the UI-owner once they exist (finding-2 Fix B).
+        client.OwnsWindows = list.OwnsWindows;
 
         ClientInfo info;
         lock (_gate)
@@ -321,6 +374,15 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
             // The hub-id stays in _seen so its history/profile is still listable.
             ReleaseSuffix_NoLock(client.AppId, client.ClientId);
             wasActive = _active == client.ClientId;
+            if (wasActive)
+            {
+                // Clear active so ListClients reflects reality, but remember this id so
+                // its reconnect auto-reclaims active (finding-1 auto-reselect). A manual
+                // hub_select_client of a different client now sets _active non-null, which
+                // the reconnect's "_active is null" guard then respects.
+                _active = null;
+                _lastActive = client.ClientId;
+            }
         }
 
         // Fail any in-flight invokes so callers don't hang.
@@ -406,6 +468,9 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
             lock (_gate)
             {
                 _active = value;
+                // A deliberate selection supersedes any pending auto-reselect target, so a
+                // previously-active client reconnecting later won't steal this choice back.
+                _lastActive = null;
                 info = value is not null
                     ? (_live.TryGetValue(value, out var l) ? Snapshot_NoLock(l)
                         : _seen.TryGetValue(value, out var s) ? s : null)
@@ -543,6 +608,80 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     }
 
     /// <inheritdoc/>
+    public async Task<ClientInfo?> WaitForClientAsync(
+        string? appIdOrClientId, TimeSpan timeout, CancellationToken cancellationToken = default)
+    {
+        // Fast path: already connected? Return without awaiting any event. Doing this
+        // BEFORE subscribing closes the race where the client connects between the check
+        // and the subscription (event-driven brokers' classic lost-wakeup).
+        if (FindConnectedMatch(appIdOrClientId) is { } already)
+            return already;
+
+        var tcs = new TaskCompletionSource<ClientInfo>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void OnConnected(object? _, ClientInfo info)
+        {
+            if (Matches(info, appIdOrClientId))
+                tcs.TrySetResult(info);
+        }
+
+        ClientConnected += OnConnected;
+        try
+        {
+            // Re-check after subscribing: a connect that landed in the tiny window between
+            // the fast-path check and the subscription is recovered here.
+            if (FindConnectedMatch(appIdOrClientId) is { } raced)
+                return raced;
+
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(timeout);
+            using (timeoutCts.Token.Register(static s =>
+                       ((TaskCompletionSource<ClientInfo>)s!).TrySetCanceled(), tcs))
+            {
+                try
+                {
+                    return await tcs.Task.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    return null; // timed out — no matching client appeared in time
+                }
+            }
+        }
+        finally
+        {
+            ClientConnected -= OnConnected;
+        }
+    }
+
+    // The first connected client matching the filter, or null. A null/empty filter
+    // matches any connected client; otherwise the hub-id or bare app-id must match.
+    private ClientInfo? FindConnectedMatch(string? appIdOrClientId)
+    {
+        lock (_gate)
+        {
+            foreach (var c in _live.Values)
+            {
+                var info = Snapshot_NoLock(c);
+                if (Matches(info, appIdOrClientId))
+                    return info;
+            }
+        }
+        return null;
+    }
+
+    // Whether a client snapshot satisfies a wait filter: null/empty matches anything;
+    // a non-empty filter matches the exact hub-id or the bare app-id (ordinal-insensitive).
+    private static bool Matches(ClientInfo info, string? appIdOrClientId)
+    {
+        if (string.IsNullOrWhiteSpace(appIdOrClientId))
+            return info.IsConnected;
+        return info.IsConnected
+            && (string.Equals(info.ClientId, appIdOrClientId, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(info.AppId, appIdOrClientId, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <inheritdoc/>
     public event EventHandler<ClientInfo>? ClientConnected;
     /// <inheritdoc/>
     public event EventHandler<ClientInfo>? ClientUpdated;
@@ -655,6 +794,7 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
         DisplayName = c.DisplayName,
         ProcessId = c.ProcessId,
         IsConnected = true,
+        OwnsWindows = c.OwnsWindows,
         ReadOnly = c.ReadOnly,
         Tools = c.Tools,
         ExecutablePath = c.ExecutablePath,
@@ -748,6 +888,7 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
         public string? Arguments { get; set; }
         public string? WorkingDirectory { get; set; }
         public bool ReadOnly { get; set; }
+        public bool OwnsWindows { get; set; }
         public DateTimeOffset ConnectedAtUtc { get; set; }
         public IReadOnlyList<ToolDescriptor> Tools { get; set; } = Array.Empty<ToolDescriptor>();
 

@@ -137,6 +137,18 @@ public sealed class AvaloniaUiAdapter : IUiAdapter
         element is Control c && !string.IsNullOrEmpty(c.Name) ? c.Name : null;
 
     /// <inheritdoc />
+    public IEnumerable<string> GetClasses(object element)
+    {
+        // StyledElement.Classes enumerates BOTH author style classes and framework
+        // pseudo-classes (e.g. ":pointerover", ":pressed"), with pseudo-classes carrying a
+        // leading ':'. The selector grammar's .class targets author classes only, so we skip
+        // the colon-prefixed pseudo entries.
+        if (element is not StyledElement se)
+            return Array.Empty<string>();
+        return se.Classes.Where(c => c.Length == 0 || c[0] != ':');
+    }
+
+    /// <inheritdoc />
     public string? GetTitle(object element) => element is Window w ? w.Title : null;
 
     /// <inheritdoc />

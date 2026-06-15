@@ -98,13 +98,17 @@ public sealed class BrokerClient : IAsyncDisposable
             DisplayName = _displayName,
             ProcessId = Environment.ProcessId,
             ProtocolVersion = ProtocolVersion.Current,
+            OwnsWindows = await OwnsWindowsAsync(ct).ConfigureAwait(false),
         }, cancellationToken: ct).ConfigureAwait(false);
 
-        // 2. Report tool catalog.
+        // 2. Report tool catalog. ownsWindows is recomputed here (not just at register)
+        //    because a process whose windows open after startup only becomes the
+        //    UI-owner once they exist.
         await channel.SendAsync(MessageKind.ToolList, new ToolListMessage
         {
             ClientId = _clientId,
             Tools = _toolHost!.Describe(),
+            OwnsWindows = await OwnsWindowsAsync(ct).ConfigureAwait(false),
         }, cancellationToken: ct).ConfigureAwait(false);
 
         // 3. Start heartbeat pump alongside the receive loop.
@@ -146,6 +150,34 @@ public sealed class BrokerClient : IAsyncDisposable
                 }
                 catch { /* channel may already be dead — ignore */ }
             }
+        }
+    }
+
+    /// <summary>
+    /// Whether this app currently owns any top-level window — reported so the hub can
+    /// flag the UI-owning client among several registrants of the same app. Computed on
+    /// the UI thread (<see cref="IUiAdapter.EnumerateRoots"/>/<see cref="IUiAdapter.IsControl"/>
+    /// are UI-thread only) and is strictly best-effort: any failure reports false rather
+    /// than blocking registration.
+    /// </summary>
+    private async Task<bool> OwnsWindowsAsync(CancellationToken ct)
+    {
+        try
+        {
+            return await _dispatcher.Run(() =>
+            {
+                foreach (var root in _adapter.EnumerateRoots())
+                {
+                    if (_adapter.IsControl(root))
+                        return true;
+                }
+                return false;
+            }).WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[Keincheck.Client] ownsWindows probe failed: {ex.Message}");
+            return false;
         }
     }
 
