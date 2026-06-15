@@ -7,6 +7,7 @@
 
     <!-- NuGet package metadata -->
     <PackageId>Keincheck.Protocol</PackageId>
+    <IsPackable>true</IsPackable>
     <Version>0.1.0</Version>
     <Authors>Keincheck</Authors>
     <Description>IPC message DTOs and a length-prefixed, chunked framing codec for the Keincheck broker. Pure data + framing; zero dependencies (no Avalonia, no MCP).</Description>

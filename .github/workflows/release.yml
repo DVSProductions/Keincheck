@@ -54,3 +54,14 @@ jobs:
           --releaseName "Keincheck Hub ${{ steps.ver.outputs.version }}"
           --tag ${{ github.ref_name }}
           --token ${{ secrets.GITHUB_TOKEN }}
+
+      # Publish the library packages to NuGet.org. Skipped automatically unless a
+      # NUGET_API_KEY repository secret is configured.
+      - name: Pack libraries
+        run: dotnet pack Keincheck.sln -c Release -o artifacts/nupkg
+
+      - name: Push libraries to NuGet
+        if: ${{ env.NUGET_API_KEY != '' }}
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: dotnet nuget push "artifacts/nupkg/*.nupkg" -s https://api.nuget.org/v3/index.json -k $env:NUGET_API_KEY --skip-duplicate

@@ -7,6 +7,7 @@
 
     <!-- NuGet package metadata -->
     <PackageId>Keincheck.Core</PackageId>
+    <IsPackable>true</IsPackable>
     <Version>0.1.0</Version>
     <Authors>Keincheck</Authors>
     <Description>The framework-agnostic UI introspection engine for Keincheck: control registry, CSS-ish selectors, property serialization, the MCP tool set, and the IUiAdapter seam with an Avalonia 12 implementation.</Description>
