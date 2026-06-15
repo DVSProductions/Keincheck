@@ -56,21 +56,21 @@ Point any MCP-capable client at `http://127.0.0.1:3001`.
 ```
    AI client (Claude Code / Desktop)
         │ stdio (MCP)
-   ┌────▼───────────────┐  ensures-up / launches
+   ┌────▼──────────────┐  ensures-up / launches
    │ keincheck-connect │  (stdio shim)
-   └────┬───────────────┘
+   └────┬──────────────┘
         │ MCP over a named pipe
-   ┌────▼──────────────────────────────────────────┐
-   │ Keincheck.Hub  (Velopack daemon, tray)       │
-   │  • MCP server: meta-tools + proxy of active app│
-   │  • named-pipe broker  • registry + launcher    │
+   ┌────▼────────────────────────────────────────────┐
+   │ Keincheck.Hub  (Velopack daemon, tray)          │
+   │  • MCP server: meta-tools + proxy of active app │
+   │  • named-pipe broker  • registry + launcher     │
    │  • audit log • per-app read-only toggle         │
-   └────┬───────────────────────┬───────────────────┘
-        │ named pipe            │ named pipe
-   ┌────▼─────────┐        ┌────▼─────────┐
-   │ Your app     │        │ Another app  │   apps embed
-   │ +UseMcpClient│        │ +UseMcpClient│   Keincheck.Client
-   └──────────────┘        └──────────────┘
+   └────┬────────────────────────┬───────────────────┘
+        │ named pipe             │ named pipe
+   ┌────▼──────────┐        ┌────▼──────────┐
+   │ Your app      │        │ Another app   │   apps embed
+   │ +UseMcpClient │        │ +UseMcpClient │   Keincheck.Client
+   └───────────────┘        └───────────────┘
 ```
 
 Tools execute **inside each app** (where Avalonia lives); the hub is a framework-agnostic
