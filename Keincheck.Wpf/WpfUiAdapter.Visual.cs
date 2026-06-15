@@ -53,6 +53,208 @@ public sealed partial class WpfUiAdapter
         return false;
     }
 
+    /// <inheritdoc />
+    /// <remarks>
+    /// Renders <paramref name="topLevel"/> via the existing <see cref="RenderTargetBitmap"/>
+    /// path to obtain the base bitmap and the DIP→pixel <c>scale</c> it was downscaled at, then
+    /// composes the numbered overlays in a single <see cref="DrawingVisual"/>: the base image at
+    /// (0,0), and per <see cref="UiMark"/> a high-contrast 2-DIP rectangle plus a small numbered
+    /// badge. Because each mark's <see cref="UiMark.Rect"/> is in top-level client DIPs, every
+    /// drawn coordinate is multiplied by <c>scale</c> so the boxes land on the right pixels in
+    /// the (possibly downscaled) image. The composed visual is re-rendered to a
+    /// <see cref="RenderTargetBitmap"/> and PNG-encoded. Honors <paramref name="maxDim"/> and the
+    /// same blank/locked-workstation guard as <see cref="TryRenderToPng"/> (a fully transparent
+    /// base render fails with an explicit error rather than emitting a deceptive blank PNG). On
+    /// failure sets <paramref name="error"/> and returns <c>false</c>. UI-thread only.
+    /// </remarks>
+    public bool TryRenderAnnotated(
+        object topLevel, int maxDim, IReadOnlyList<UiMark> marks, out byte[] png, out string error)
+    {
+        png = Array.Empty<byte>();
+        error = string.Empty;
+
+        if (topLevel is not FrameworkElement target)
+        {
+            error = "Target is not a renderable visual.";
+            return false;
+        }
+
+        // Render the base bitmap through the SAME RTB path TryRenderToPng uses, but keep the
+        // BitmapSource (and the scale it baked in) so overlays can be drawn in the matching
+        // pixel space. We deliberately do NOT fall back to the GDI PrintWindow capture here:
+        // that path returns only encoded bytes with no usable DIP→pixel scale, so overlay
+        // geometry could not be placed. A blank/locked-workstation base fails honestly below.
+        if (!TryRenderBaseBitmap(target, maxDim, out var baseBitmap, out var scale, out error))
+            return false;
+
+        // No marks (or the Phase-A empty list): the annotated render is just the base image.
+        // Encode the already-rendered base rather than re-composing an identical visual.
+        if (marks is null || marks.Count == 0)
+            return EncodeBitmap(baseBitmap, out png, out error);
+
+        try
+        {
+            var pixelW = baseBitmap.PixelWidth;
+            var pixelH = baseBitmap.PixelHeight;
+            var dpi = 96.0 * scale;
+
+            // Compose base + overlays in a DrawingVisual. Drawing happens in DIP space at the
+            // base's DPI (96·scale), so a DIP coordinate maps to `scale` device pixels exactly
+            // like the base render — no manual pixel multiply needed on the geometry itself.
+            var drawing = new DrawingVisual();
+            using (var dc = drawing.RenderOpen())
+            {
+                // Base image fills the whole DIP canvas (pixel size / scale back to DIPs).
+                var canvas = new Rect(0, 0, pixelW / scale, pixelH / scale);
+                dc.DrawImage(baseBitmap, canvas);
+
+                foreach (var mark in marks)
+                    DrawMark(dc, mark, canvas);
+            }
+
+            var composed = new RenderTargetBitmap(pixelW, pixelH, dpi, dpi, PixelFormats.Pbgra32);
+            composed.Render(drawing);
+            composed.Freeze();
+            return EncodeBitmap(composed, out png, out error);
+        }
+        catch (Exception ex)
+        {
+            error = $"Annotated render failed while composing {marks.Count} mark(s): {ex.Message}";
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Renders <paramref name="element"/> (a top-level) to a non-blank <see cref="BitmapSource"/>
+    /// via the <see cref="RenderTargetBitmap"/> path, reporting the uniform DIP→pixel
+    /// <paramref name="scale"/> it was downscaled at. Applies the same transparency guard as
+    /// <see cref="EncodeVerified"/> so a locked-workstation / no-render-surface session fails
+    /// with an explicit error instead of yielding a blank base for overlays.
+    /// </summary>
+    private bool TryRenderBaseBitmap(
+        FrameworkElement element, int maxDim, out BitmapSource bitmap, out double scale, out string error)
+    {
+        bitmap = null!;
+        scale = 1.0;
+        error = string.Empty;
+
+        // For a Window, the renderable visual is its content child (the Window itself renders
+        // blank — see TryRenderWindowToPng); otherwise the element renders its own subtree.
+        var renderTarget = element is Window window ? WindowContentVisual(window) ?? element : element;
+
+        EnsureArranged(renderTarget);
+        var size = renderTarget.RenderSize;
+        if (size.Width <= 0 || size.Height <= 0)
+        {
+            error = $"Control '{Describe(renderTarget)}' has no renderable size " +
+                    $"({size.Width}x{size.Height}); it may not be laid out or visible.";
+            return false;
+        }
+
+        var max = maxDim > 0 ? maxDim : _defaultMaxDimension;
+        var (pixelW, pixelH, s) = ClampToPixels(size.Width, size.Height, max);
+
+        BitmapSource rendered;
+        try
+        {
+            rendered = RenderVisual(renderTarget, pixelW, pixelH, s, cropPixels: null);
+        }
+        catch (Exception ex)
+        {
+            error = $"Base render of '{Describe(renderTarget)}' failed ({ex.Message}).";
+            return false;
+        }
+
+        if (IsFullyTransparent(rendered))
+        {
+            error =
+                "Render produced a fully transparent bitmap. WPF's RenderTargetBitmap is not " +
+                $"functional in this process (RenderCapability.Tier={RenderCapability.Tier >> 16}); " +
+                "this happens when WPF has no live display/render surface — most commonly a LOCKED " +
+                "WORKSTATION or a disconnected RDP session, but also a headless / no-GPU / service " +
+                "session. Unlock the desktop (or use an interactive session) and rendering works.";
+            return false;
+        }
+
+        bitmap = rendered;
+        scale = s;
+        return true;
+    }
+
+    /// <summary>
+    /// Draws one numbered mark: a high-contrast box outlining <see cref="UiMark.Rect"/> (clamped
+    /// to the image) and a filled number badge at its top-left corner. All coordinates are in the
+    /// base image's DIP space.
+    /// </summary>
+    private static void DrawMark(DrawingContext dc, UiMark mark, Rect canvas)
+    {
+        var box = Rect.Intersect(
+            new Rect(mark.Rect.X, mark.Rect.Y, Math.Max(0, mark.Rect.Width), Math.Max(0, mark.Rect.Height)),
+            canvas);
+        if (box.IsEmpty || box.Width <= 0 || box.Height <= 0)
+            return;
+
+        // Outline: a 2-DIP magenta pen over a thin white "halo" pen, so the box is legible on
+        // both light and dark UI (mirrors the set-of-marks high-contrast convention).
+        dc.DrawRectangle(null, HaloPen, box);
+        dc.DrawRectangle(null, MarkPen, box);
+
+        // Number badge anchored at the box's top-left, nudged inside so it is not clipped.
+        var label = mark.Number.ToString(CultureInfo.InvariantCulture);
+        var text = new FormattedText(
+            label,
+            CultureInfo.InvariantCulture,
+            FlowDirection.LeftToRight,
+            BadgeTypeface,
+            BadgeFontSize,
+            Brushes.White,
+            1.0);
+
+        var pad = 2.0;
+        var badgeW = text.Width + pad * 2;
+        var badgeH = text.Height + pad * 2;
+        var bx = Math.Min(box.X, canvas.Right - badgeW);
+        var by = Math.Min(box.Y, canvas.Bottom - badgeH);
+        bx = Math.Max(canvas.Left, bx);
+        by = Math.Max(canvas.Top, by);
+
+        dc.DrawRectangle(BadgeFill, null, new Rect(bx, by, badgeW, badgeH));
+        dc.DrawText(text, new Point(bx + pad, by + pad));
+    }
+
+    /// <summary>PNG-encodes an already-verified bitmap (no blank check; the source is known good).</summary>
+    private static bool EncodeBitmap(BitmapSource bitmap, out byte[] png, out string error)
+    {
+        error = string.Empty;
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        using var ms = new MemoryStream();
+        encoder.Save(ms);
+        png = ms.ToArray();
+        return true;
+    }
+
+    // High-contrast overlay drawing resources (frozen so they are cheap + thread-safe to reuse).
+    private static readonly Pen MarkPen = CreateFrozenPen(Brushes.Magenta, 2.0);
+    private static readonly Pen HaloPen = CreateFrozenPen(Brushes.White, 4.0);
+    private static readonly Brush BadgeFill = CreateFrozenBrush(Color.FromArgb(0xCC, 0xC0, 0x00, 0xC0));
+    private static readonly Typeface BadgeTypeface = new("Segoe UI");
+    private const double BadgeFontSize = 12.0;
+
+    private static Pen CreateFrozenPen(Brush brush, double thickness)
+    {
+        var pen = new Pen(brush, thickness);
+        pen.Freeze();
+        return pen;
+    }
+
+    private static Brush CreateFrozenBrush(Color color)
+    {
+        var brush = new SolidColorBrush(color);
+        brush.Freeze();
+        return brush;
+    }
+
     /// <summary>
     /// The RenderTargetBitmap path: a <see cref="Window"/> renders as a whole visual; any other
     /// <see cref="FrameworkElement"/> renders its own subtree (with a window-crop fallback).

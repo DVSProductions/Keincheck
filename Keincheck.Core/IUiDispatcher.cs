@@ -30,4 +30,18 @@ public interface IUiDispatcher
 
     /// <summary>Runs an async <paramref name="fn"/> on the UI thread and awaits it.</summary>
     Task RunAsync(Func<Task> fn);
+
+    /// <summary>
+    /// Completes once the UI thread has gone idle — pending layout, render, and queued
+    /// work have drained. Tools <c>await</c> this after driving input so the next
+    /// inspection observes a settled tree.
+    /// </summary>
+    /// <remarks>
+    /// The default implementation is a plain UI-thread round-trip (<see cref="Run(Action)"/>
+    /// of a no-op): it only guarantees that work already queued <em>ahead</em> of the call
+    /// has run, which is a cheap, correct lower bound on idleness. Adapters override this to
+    /// post a <em>Background</em>-priority no-op (so it runs only after layout/render
+    /// passes), giving a true "the UI has settled" wait.
+    /// </remarks>
+    Task WaitForIdle() => Run(() => { });
 }

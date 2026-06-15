@@ -72,6 +72,109 @@ public sealed partial class WpfUiAdapter
     private static T? GetProvider<T>(AutomationPeer peer, PatternInterface pattern) where T : class =>
         peer.GetPattern(pattern) as T;
 
+    // ------------------------------------------------------------- semantic view
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Derives the accessibility view from the element's UI-Automation peer
+    /// (<see cref="UIElementAutomationPeer.CreatePeerForElement(UIElement)"/>): the role is
+    /// the peer's <see cref="AutomationControlType"/>, the name is
+    /// <see cref="AutomationPeer.GetName"/>, and the value/states come from the actionable
+    /// patterns (Value text; Toggle/ExpandCollapse/SelectionItem plus the peer's
+    /// enabled/focused/offscreen flags as states). <see cref="UiSemanticInfo.IsInteractive"/>
+    /// is true when any actionable pattern is present. When no peer exists (a control that
+    /// returns null from <c>OnCreateAutomationPeer</c>, or a non-<see cref="UIElement"/>),
+    /// it falls back to the neutral type-name role + <see cref="GetName"/> the base default
+    /// produces. UI-thread only.
+    /// </remarks>
+    public UiSemanticInfo GetSemanticInfo(object element)
+    {
+        // No peer-backed view available: mirror the seam's default (type name as role,
+        // GetName as name, no value/interaction/states) rather than inventing data.
+        if (element is not UIElement uiElement ||
+            UIElementAutomationPeer.CreatePeerForElement(uiElement) is not { } peer)
+            return new UiSemanticInfo(GetTypeName(element), GetName(element), null, false, Array.Empty<string>());
+
+        // Role: the automation control type (e.g. "Button"), with the framework type name as
+        // a fallback when the peer reports the generic Custom type or throws.
+        string role;
+        try
+        {
+            var controlType = peer.GetAutomationControlType();
+            role = controlType == AutomationControlType.Custom
+                ? GetTypeName(element)
+                : controlType.ToString();
+        }
+        catch
+        {
+            role = GetTypeName(element);
+        }
+
+        // Name: prefer the peer's accessible name, fall back to the element's x:Name.
+        string? name;
+        try { name = NullIfEmpty(peer.GetName()); }
+        catch { name = null; }
+        name ??= GetName(element);
+
+        string? value = null;
+        var states = new List<string>();
+        var isInteractive = false;
+
+        // Value pattern → the text value; a non-read-only value sink is editable (interactive).
+        if (GetProvider<IValueProvider>(peer, PatternInterface.Value) is { } valueProvider)
+        {
+            value = valueProvider.Value;
+            if (!valueProvider.IsReadOnly)
+                isInteractive = true;
+            else
+                states.Add("readonly");
+        }
+
+        // Toggle pattern → checked/unchecked/indeterminate state; togglable is interactive.
+        if (GetProvider<IToggleProvider>(peer, PatternInterface.Toggle) is { } toggleProvider)
+        {
+            isInteractive = true;
+            states.Add(toggleProvider.ToggleState switch
+            {
+                ToggleState.On => "checked",
+                ToggleState.Off => "unchecked",
+                _ => "indeterminate",
+            });
+        }
+
+        // ExpandCollapse → expanded/collapsed; invokable expander is interactive.
+        if (GetProvider<IExpandCollapseProvider>(peer, PatternInterface.ExpandCollapse) is { } expandProvider)
+        {
+            isInteractive = true;
+            states.Add(expandProvider.ExpandCollapseState == ExpandCollapseState.Expanded ? "expanded" : "collapsed");
+        }
+
+        // SelectionItem → selected/unselected; selectable is interactive.
+        if (GetProvider<ISelectionItemProvider>(peer, PatternInterface.SelectionItem) is { } selectionProvider)
+        {
+            isInteractive = true;
+            states.Add(selectionProvider.IsSelected ? "selected" : "unselected");
+        }
+
+        // Invoke (push buttons, etc.) carries no state but is the canonical interactive pattern.
+        if (GetProvider<IInvokeProvider>(peer, PatternInterface.Invoke) is not null)
+            isInteractive = true;
+
+        // Peer flags surface the screen-reader states the seam documents.
+        try { if (!peer.IsEnabled()) states.Add("disabled"); } catch { /* peer may not support the query */ }
+        try { if (peer.HasKeyboardFocus()) states.Add("focused"); } catch { /* ignore */ }
+        try { if (peer.IsOffscreen()) states.Add("offscreen"); } catch { /* ignore */ }
+
+        return new UiSemanticInfo(
+            role,
+            name,
+            value,
+            isInteractive,
+            states.Count == 0 ? Array.Empty<string>() : states.ToArray());
+    }
+
+    private static string? NullIfEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;
+
     private static UiAutomationResult DoAuto(AutomationPeer peer, string? value)
     {
         // Same precedence as the Avalonia adapter: a supplied value targets a writable

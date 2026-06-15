@@ -150,6 +150,45 @@ public sealed partial class WpfUiAdapter
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Maps the element's own (0,0)→RenderSize box through
+    /// <c>TransformToAncestor(topLevel)</c>, yielding the element's rendered bounds in the
+    /// top-level's client DIP space — the box set-of-marks overlays are drawn at. WPF's
+    /// <see cref="Visual.TransformToAncestor(Visual)"/> throws an
+    /// <see cref="InvalidOperationException"/> when the two visuals do not share a common
+    /// visual root (the contract's "not in the same tree" case), which we catch and report
+    /// as <c>false</c> with the parent-relative <see cref="GetBounds"/> fallback. The
+    /// transform composes the offset of every intermediate visual, so a translated/scaled
+    /// ancestor is accounted for exactly.
+    /// </remarks>
+    public bool TryGetBoundsInTopLevel(object element, object topLevel, out UiRect rect)
+    {
+        // Default (and failure) value is the parent-relative bounds, matching the seam's
+        // documented "no usable on-screen box" fallback semantics.
+        rect = GetBounds(element);
+
+        if (element is not Visual visual || topLevel is not Visual root)
+            return false;
+
+        // A visual cannot be its own meaningful ancestor here, and TransformToAncestor of a
+        // visual to itself is identity — treat the top-level as already top-level-relative.
+        try
+        {
+            var transform = visual.TransformToAncestor(root);
+            var local = visual is FrameworkElement fe ? new Rect(fe.RenderSize) : new Rect(default(Size));
+            var mapped = transform.TransformBounds(local);
+            rect = new UiRect(mapped.X, mapped.Y, mapped.Width, mapped.Height);
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            // Not in the same visual tree (no common ancestor) — keep the parent-relative
+            // fallback already in `rect` and report no usable on-screen box.
+            return false;
+        }
+    }
+
+    /// <inheritdoc />
     public bool IsEffectivelyVisible(object element) => element is UIElement u && u.IsVisible;
 
     /// <inheritdoc />

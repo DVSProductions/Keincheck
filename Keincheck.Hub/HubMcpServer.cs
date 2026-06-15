@@ -30,6 +30,7 @@ public sealed class HubMcpServer : IAsyncDisposable
 {
     private readonly IClientBroker _broker;
     private readonly HubOptions _options;
+    private readonly HubRecorder _recorder = new();
     private WebApplication? _web;
 
     // The live MCP servers we can notify of list changes / log messages (each HTTP or
@@ -142,7 +143,12 @@ public sealed class HubMcpServer : IAsyncDisposable
         var name = p.Name;
         var args = ArgsToElement(p.Arguments);
 
-        // 1) Meta-tools are dispatched in-hub.
+        // 1) Record/replay/export meta-tools are routed HERE, before the pure dispatcher,
+        //    because they need the recorder/broker state the server owns.
+        if (HandleRecordTool(name, args, ct) is { } recordResult)
+            return await recordResult.ConfigureAwait(false);
+
+        // 2) The remaining meta-tools are pure and dispatched in-hub.
         if (HubMetaTools.IsMetaTool(name))
         {
             return await HubMetaTools
@@ -150,7 +156,7 @@ public sealed class HubMcpServer : IAsyncDisposable
                 .ConfigureAwait(false);
         }
 
-        // 2) Everything else is a proxied tool. Resolve the target client: an explicit
+        // 3) Everything else is a proxied tool. Resolve the target client: an explicit
         //    'client' argument overrides the active selection for this one call.
         var (targetId, toolArgs) = ResolveTarget(name, args);
         if (targetId is null)
@@ -176,7 +182,20 @@ public sealed class HubMcpServer : IAsyncDisposable
                 .InvokeOnClientAsync(targetId, toolName, toolArgs, timeoutCts.Token)
                 .ConfigureAwait(false);
 
-            return ToCallToolResult(clientResult);
+            var result = ToCallToolResult(clientResult);
+
+            // Capture the proxied step if a recording is active. We record the forwarded
+            // (post-resolve) args and the success flag, never meta/record tools (they are
+            // intercepted above and never reach this proxy path).
+            _recorder.Capture(new RecordedStep
+            {
+                ClientId = targetId,
+                ToolName = toolName,
+                ArgsJson = toolArgs,
+                Ok = result.IsError != true,
+            });
+
+            return result;
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -191,6 +210,236 @@ public sealed class HubMcpServer : IAsyncDisposable
                 : HubMetaTools.DownClientError(targetId, $"dropped during the call ({ex.Message})");
         }
     }
+
+    // ---- record / replay / export -----------------------------------------
+
+    /// <summary>
+    /// Routes the recorder-backed meta-tools (record start/stop/status, replay, export).
+    /// Returns the pending result task when <paramref name="name"/> is one of them, or
+    /// <c>null</c> so the caller falls through to the pure dispatcher / proxy path.
+    /// These live here (not in <see cref="HubMetaTools"/>) because they need the server's
+    /// <see cref="HubRecorder"/> and the broker's invoke path.
+    /// </summary>
+    private ValueTask<CallToolResult>? HandleRecordTool(string name, JsonElement? args, CancellationToken ct)
+    {
+        return name switch
+        {
+            HubMetaTools.RecordStart  => ValueTask.FromResult(RecordStart(args)),
+            HubMetaTools.RecordStop   => ValueTask.FromResult(RecordStop()),
+            HubMetaTools.RecordStatus => ValueTask.FromResult(RecordStatus()),
+            HubMetaTools.Replay       => ReplayAsync(args, ct),
+            HubMetaTools.ExportTest   => ValueTask.FromResult(ExportTest(args)),
+            _ => null,
+        };
+    }
+
+    private CallToolResult RecordStart(JsonElement? args)
+    {
+        var name = TryGetString(args, "name");
+        _recorder.Start(name);
+        return HubMetaTools.JsonResult(new { recording = true, name });
+    }
+
+    private CallToolResult RecordStop()
+    {
+        var steps = _recorder.Stop();
+        return HubMetaTools.JsonResult(new { recording = false, steps });
+    }
+
+    private CallToolResult RecordStatus() =>
+        HubMetaTools.JsonResult(new
+        {
+            recording = _recorder.IsRecording,
+            steps = _recorder.Count,
+            name = _recorder.Name,
+        });
+
+    /// <summary>
+    /// Re-issues every buffered step to its original client, in order. Steps whose client
+    /// is no longer connected are labelled skipped instead of failing the whole replay.
+    /// </summary>
+    private async ValueTask<CallToolResult> ReplayAsync(JsonElement? args, CancellationToken ct)
+    {
+        var stopOnError = TryGetBool(args, "stopOnError") ?? false;
+        var delayMs = Math.Max(0, TryGetInt(args, "delayMs") ?? 0);
+
+        var steps = _recorder.Snapshot();
+        var outcomes = new List<object>(steps.Count);
+        int ok = 0, failed = 0, skipped = 0;
+
+        for (var i = 0; i < steps.Count; i++)
+        {
+            var step = steps[i];
+
+            // A client that has since dropped can't service the step — skip, don't fail.
+            if (_broker.ClientStatus(step.ClientId) is not { IsConnected: true })
+            {
+                skipped++;
+                outcomes.Add(new { i, tool = step.ToolName, client = step.ClientId, ok = false, skipped = true, error = $"client '{step.ClientId}' not connected" });
+                continue;
+            }
+
+            if (delayMs > 0 && i > 0)
+                await Task.Delay(delayMs, ct).ConfigureAwait(false);
+
+            try
+            {
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                timeoutCts.CancelAfter(_options.InvokeTimeout);
+
+                var res = await _broker
+                    .InvokeOnClientAsync(step.ClientId, step.ToolName, step.ArgsJson, timeoutCts.Token)
+                    .ConfigureAwait(false);
+
+                if (res.IsError)
+                {
+                    failed++;
+                    outcomes.Add(new { i, tool = step.ToolName, client = step.ClientId, ok = false, error = res.Error ?? "client reported an error" });
+                    if (stopOnError) break;
+                }
+                else
+                {
+                    ok++;
+                    outcomes.Add(new { i, tool = step.ToolName, client = step.ClientId, ok = true });
+                }
+            }
+            catch (Exception ex)
+            {
+                failed++;
+                outcomes.Add(new { i, tool = step.ToolName, client = step.ClientId, ok = false, error = ex.Message });
+                if (stopOnError) break;
+            }
+        }
+
+        return HubMetaTools.JsonResult(new
+        {
+            replayed = steps.Count,
+            ok,
+            failed,
+            skipped,
+            stopOnError,
+            steps = outcomes,
+        });
+    }
+
+    /// <summary>
+    /// Exports the current recording: <c>"json"</c> yields a replayable scenario document,
+    /// <c>"csharp"</c> yields a best-effort xUnit <c>[Fact]</c> skeleton (a starting point,
+    /// not guaranteed to compile against any particular harness).
+    /// </summary>
+    private CallToolResult ExportTest(JsonElement? args)
+    {
+        var format = (TryGetString(args, "format") ?? "json").Trim().ToLowerInvariant();
+        var steps = _recorder.Snapshot();
+
+        if (format == "csharp")
+            return HubMetaTools.JsonResult(new { format = "csharp", code = BuildCSharpSkeleton(steps, _recorder.Name) });
+
+        // Default: a replayable JSON scenario document.
+        var scenario = new System.Text.Json.Nodes.JsonObject
+        {
+            ["version"] = 1,
+            ["name"] = _recorder.Name,
+        };
+        var stepArray = new System.Text.Json.Nodes.JsonArray();
+        foreach (var s in steps)
+        {
+            stepArray.Add(new System.Text.Json.Nodes.JsonObject
+            {
+                ["clientId"] = s.ClientId,
+                ["tool"] = s.ToolName,
+                ["args"] = s.ArgsJson is { } a ? System.Text.Json.Nodes.JsonNode.Parse(a.GetRawText()) : null,
+            });
+        }
+        scenario["steps"] = stepArray;
+
+        return HubMetaTools.JsonResult(new
+        {
+            format = "json",
+            scenario = JsonSerializer.SerializeToElement(scenario, ProtocolJson.Options),
+        });
+    }
+
+    /// <summary>
+    /// Builds a commented xUnit <c>[Fact]</c> skeleton that lists the recorded steps as
+    /// structured invoke calls. It is explicitly a starting point — the assertion/harness
+    /// wiring is left to the caller, so it is not guaranteed to compile as-is.
+    /// </summary>
+    private static string BuildCSharpSkeleton(IReadOnlyList<RecordedStep> steps, string? name)
+    {
+        var method = SanitizeIdentifier(name) is { Length: > 0 } id ? id : "RecordedScenario";
+        var sb = new System.Text.StringBuilder();
+
+        sb.AppendLine("// Auto-generated from a Keincheck hub recording. STARTING POINT ONLY —");
+        sb.AppendLine("// wire it to your own test harness/broker; it is not guaranteed to compile.");
+        sb.AppendLine("using System.Text.Json;");
+        sb.AppendLine("using Xunit;");
+        sb.AppendLine();
+        sb.AppendLine("public class KeincheckScenarioTests");
+        sb.AppendLine("{");
+        sb.AppendLine("    [Fact]");
+        sb.AppendLine($"    public async Task {method}()");
+        sb.AppendLine("    {");
+        sb.AppendLine("        // var broker = /* your IClientBroker */;");
+
+        if (steps.Count == 0)
+        {
+            sb.AppendLine("        // (no steps were recorded)");
+        }
+        else
+        {
+            for (var i = 0; i < steps.Count; i++)
+            {
+                var s = steps[i];
+                var argsLiteral = s.ArgsJson is { } a
+                    ? $"\"\"\"{a.GetRawText()}\"\"\""
+                    : "null";
+                sb.AppendLine($"        // step {i}: {s.ToolName} on {s.ClientId} (recorded ok={s.Ok.ToString().ToLowerInvariant()})");
+                sb.AppendLine($"        var args{i} = {argsLiteral} is string j{i} ? JsonSerializer.Deserialize<JsonElement>(j{i}) : (JsonElement?)null;");
+                sb.AppendLine($"        var result{i} = await broker.InvokeOnClientAsync(\"{Escape(s.ClientId)}\", \"{Escape(s.ToolName)}\", args{i});");
+                sb.AppendLine($"        Assert.False(result{i}.IsError);");
+                sb.AppendLine();
+            }
+        }
+
+        sb.AppendLine("    }");
+        sb.AppendLine("}");
+        return sb.ToString();
+    }
+
+    private static string Escape(string s) => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+
+    /// <summary>Reduces a recording name to a safe C# method identifier, or empty.</summary>
+    private static string SanitizeIdentifier(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return "";
+        var sb = new System.Text.StringBuilder(name.Length);
+        foreach (var ch in name)
+            sb.Append(char.IsLetterOrDigit(ch) ? ch : '_');
+        var s = sb.ToString().Trim('_');
+        return s.Length == 0 ? "" : char.IsDigit(s[0]) ? "_" + s : s;
+    }
+
+    // ---- small typed arg readers (for the record/replay tools) ------------
+
+    private static string? TryGetString(JsonElement? args, string prop) =>
+        args is { ValueKind: JsonValueKind.Object } o
+        && o.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.String
+            ? v.GetString()
+            : null;
+
+    private static bool? TryGetBool(JsonElement? args, string prop) =>
+        args is { ValueKind: JsonValueKind.Object } o
+        && o.TryGetProperty(prop, out var v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? v.GetBoolean()
+            : null;
+
+    private static int? TryGetInt(JsonElement? args, string prop) =>
+        args is { ValueKind: JsonValueKind.Object } o
+        && o.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n)
+            ? n
+            : null;
 
     /// <summary>
     /// Picks the client a proxied call targets. A literal <c>client</c> property in the

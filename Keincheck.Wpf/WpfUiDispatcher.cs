@@ -56,4 +56,12 @@ public sealed class WpfUiDispatcher : IUiDispatcher
             return fn();
         return d.InvokeAsync(fn).Task.Unwrap();
     }
+
+    /// <inheritdoc />
+    public Task WaitForIdle() =>
+        // Post a Background-priority no-op: WPF runs layout (Loaded), render, and input at
+        // higher priorities than Background, so this continuation only completes once those
+        // passes have drained — a true "the UI has settled" wait, unlike the base no-op
+        // round-trip which only guarantees work queued AHEAD of the call has run.
+        Ui.InvokeAsync(static () => { }, DispatcherPriority.Background).Task;
 }

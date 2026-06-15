@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Text.Json;
@@ -9,6 +10,7 @@ using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.LogicalTree;
+using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.VisualTree;
 using Keincheck.Core;
@@ -146,6 +148,138 @@ public sealed class AvaloniaUiAdapter : IUiAdapter
             return new UiRect(b.X, b.Y, b.Width, b.Height);
         }
         return UiRect.Empty;
+    }
+
+    /// <inheritdoc />
+    public bool TryGetBoundsInTopLevel(object element, object topLevel, out UiRect rect)
+    {
+        // Default to the parent-relative box so a false return still carries SOMETHING
+        // usable, exactly as the seam's default contract promises.
+        rect = GetBounds(element);
+
+        if (element is not Visual visual || topLevel is not Visual root)
+            return false;
+
+        // The element box is its own local size at the origin; mapping that AABB through
+        // the element->top-level transform yields its rendered box in top-level client
+        // DIPs (the coordinate space TryRenderAnnotated draws marks in). A null transform
+        // means the two visuals are not connected through a shared coordinate root.
+        if (visual.TransformToVisual(root) is not { } toRoot)
+            return false;
+
+        var mapped = new Rect(visual.Bounds.Size).TransformToAABB(toRoot);
+        rect = new UiRect(mapped.X, mapped.Y, mapped.Width, mapped.Height);
+        return true;
+    }
+
+    /// <inheritdoc />
+    public UiSemanticInfo GetSemanticInfo(object element)
+    {
+        // No peer (non-control, or a control whose framework type has no peer): fall back
+        // to the neutral type-name role + Name, as the seam default does.
+        if (element is not Control control ||
+            ControlAutomationPeer.CreatePeerForElement(control) is not { } peer)
+        {
+            return new UiSemanticInfo(GetTypeName(element), GetName(element), null, false, Array.Empty<string>());
+        }
+
+        // Role: the automation control type if the peer reports one, else the type name.
+        var controlType = SafePeer(() => peer.GetAutomationControlType(), AutomationControlType.None);
+        var role = controlType == AutomationControlType.None ? control.GetType().Name : controlType.ToString();
+
+        // Name: the accessible name (peer) first, then the control's x:Name.
+        var peerName = SafePeer(() => peer.GetName(), string.Empty);
+        var name = !string.IsNullOrEmpty(peerName) ? peerName : GetName(element);
+
+        // Value + states are gathered from whichever automation patterns the peer exposes.
+        string? value = null;
+        var states = new List<string>(4);
+
+        if (peer.GetProvider<IValueProvider>() is { } valueProvider)
+            value = valueProvider.Value;
+        else if (peer.GetProvider<IRangeValueProvider>() is { } range)
+            value = range.Value.ToString(CultureInfo.InvariantCulture);
+
+        if (peer.GetProvider<IToggleProvider>() is { } toggle)
+        {
+            // Off/On/Indeterminate -> a "checked"/"unchecked"/"indeterminate" state.
+            states.Add(toggle.ToggleState switch
+            {
+                ToggleState.On => "checked",
+                ToggleState.Indeterminate => "indeterminate",
+                _ => "unchecked",
+            });
+        }
+
+        if (peer.GetProvider<ISelectionItemProvider>() is { } selection && selection.IsSelected)
+            states.Add("selected");
+
+        if (peer.GetProvider<IExpandCollapseProvider>() is { } expandCollapse)
+        {
+            states.Add(expandCollapse.ExpandCollapseState == global::Avalonia.Automation.ExpandCollapseState.Expanded
+                ? "expanded"
+                : "collapsed");
+        }
+
+        if (!control.IsEffectivelyEnabled)
+            states.Add("disabled");
+        if (SafePeer(() => peer.HasKeyboardFocus(), false))
+            states.Add("focused");
+
+        var interactive = IsInteractivePeer(control, peer);
+        return new UiSemanticInfo(role, name, value, interactive, states);
+    }
+
+    /// <summary>
+    /// Whether the element is interactive: it can take keyboard focus, or its automation
+    /// peer exposes an actionable pattern (invoke/toggle/value/expand-collapse/selection),
+    /// or its runtime type is a well-known interactive control.
+    /// </summary>
+    private static bool IsInteractivePeer(Control control, AutomationPeer peer)
+    {
+        if (SafePeer(() => peer.IsKeyboardFocusable(), false))
+            return true;
+
+        if (peer.GetProvider<IInvokeProvider>() is not null ||
+            peer.GetProvider<IToggleProvider>() is not null ||
+            peer.GetProvider<IExpandCollapseProvider>() is not null ||
+            peer.GetProvider<ISelectionItemProvider>() is not null ||
+            peer.GetProvider<IValueProvider>() is { IsReadOnly: false } ||
+            peer.GetProvider<IRangeValueProvider>() is { IsReadOnly: false })
+            return true;
+
+        // Type fallback for controls whose peer pattern set is empty but which the user
+        // still operates (e.g. a Hyperlink/TabItem/ListBoxItem template part). Walk the
+        // base chain by simple name, mirroring MatchesType.
+        for (var t = control.GetType(); t is not null && t != typeof(object); t = t.BaseType)
+        {
+            foreach (var typeName in InteractiveTypeNames)
+                if (string.Equals(t.Name, typeName, StringComparison.Ordinal))
+                    return true;
+        }
+
+        return false;
+    }
+
+    // Simple type names (matched up the base chain) treated as interactive when no
+    // actionable automation pattern is detected.
+    private static readonly string[] InteractiveTypeNames =
+    {
+        "Button", "ToggleButton", "RepeatButton", "MenuItem", "TabItem", "ListBoxItem",
+        "TreeViewItem", "ComboBox", "TextBox", "Slider", "CheckBox", "RadioButton",
+        "ToggleSwitch", "HyperlinkButton", "SplitButton", "NumericUpDown", "DatePicker",
+        "TimePicker", "CalendarDatePicker", "AutoCompleteBox", "ScrollBar", "Thumb",
+    };
+
+    /// <summary>
+    /// Runs an automation-peer accessor that some peers implement by throwing
+    /// (<c>NotSupportedException</c> / <c>NotImplementedException</c>) and returns
+    /// <paramref name="fallback"/> instead of letting it bubble out of a read-only query.
+    /// </summary>
+    private static T SafePeer<T>(Func<T> get, T fallback)
+    {
+        try { return get(); }
+        catch { return fallback; }
     }
 
     /// <inheritdoc />
@@ -308,6 +442,110 @@ public sealed class AvaloniaUiAdapter : IUiAdapter
         png = Array.Empty<byte>();
         error = "Target is not a renderable visual.";
         return false;
+    }
+
+    /// <inheritdoc />
+    public bool TryRenderAnnotated(
+        object topLevel, int maxDim, IReadOnlyList<UiMark> marks, out byte[] png, out string error)
+    {
+        png = Array.Empty<byte>();
+        error = string.Empty;
+
+        if (topLevel is not Visual visual)
+        {
+            error = "Annotated render target is not a renderable visual.";
+            return false;
+        }
+
+        // Nothing to overlay: fall back to the plain render path so callers still get a
+        // usable (un-annotated) screenshot honoring maxDim.
+        if (marks is null || marks.Count == 0)
+            return TryRenderToPng(topLevel, maxDim, out png, out error);
+
+        var max = maxDim > 0 ? maxDim : _defaultMaxDimension;
+        var fullSize = visual.Bounds.Size;
+        if (fullSize.Width <= 0 || fullSize.Height <= 0)
+        {
+            error = $"The visual has no renderable size ({fullSize.Width}x{fullSize.Height}).";
+            return false;
+        }
+
+        // Render the top-level at exactly the scale TryRenderToPng would use, so the
+        // overlay lands on the same pixels and maxDim is honored identically.
+        var (pixelW, pixelH, scale) = ClampToPixels(fullSize.Width, fullSize.Height, max);
+
+        try
+        {
+            // The RenderTargetBitmap's 96*scale DPI means its drawing context works in the
+            // SAME DIP units as the visual; the device scaling is applied by the bitmap.
+            // So marks (already in top-level client DIPs) are drawn at their DIP rects with
+            // no manual scaling — the bitmap maps DIP -> the downscaled pixel grid for us.
+            using var rtb = new RenderTargetBitmap(
+                new PixelSize(pixelW, pixelH), new Vector(96 * scale, 96 * scale));
+            rtb.Render(visual);
+
+            using (var ctx = rtb.CreateDrawingContext(clear: false))
+            {
+                DrawMarks(ctx, marks);
+            }
+
+            png = Encode(rtb);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = $"Annotated render failed: {ex.Message}";
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Draws each <see cref="UiMark"/> onto <paramref name="ctx"/> as a high-contrast 2px
+    /// box (in top-level DIP coordinates) plus a small filled number badge at its
+    /// top-left corner. Coordinates are DIPs; the target bitmap applies the render scale.
+    /// </summary>
+    private static void DrawMarks(DrawingContext ctx, IReadOnlyList<UiMark> marks)
+    {
+        // Magenta stroke over a thin black under-stroke = legible on both light and dark
+        // UI. Yellow badge fill with black text reads against almost any backdrop.
+        var outline = new Pen(new SolidColorBrush(Colors.Magenta), 2);
+        var halo = new Pen(new SolidColorBrush(Color.FromArgb(160, 0, 0, 0)), 4);
+        var badgeFill = new SolidColorBrush(Colors.Yellow);
+        var badgeStroke = new Pen(new SolidColorBrush(Colors.Black), 1);
+        var textBrush = new SolidColorBrush(Colors.Black);
+        var typeface = Typeface.Default;
+
+        foreach (var mark in marks)
+        {
+            var r = mark.Rect;
+            if (r.Width <= 0 || r.Height <= 0)
+                continue;
+
+            var box = new Rect(r.X, r.Y, r.Width, r.Height);
+
+            // Dark halo first (slightly thicker) so the magenta box stays visible even on
+            // a magenta-ish background, then the bright outline on top.
+            ctx.DrawRectangle(null, halo, box);
+            ctx.DrawRectangle(null, outline, box);
+
+            // Number badge anchored at the box's top-left, nudged inside the border.
+            var label = mark.Number.ToString(CultureInfo.InvariantCulture);
+            var text = new FormattedText(
+                label,
+                CultureInfo.InvariantCulture,
+                FlowDirection.LeftToRight,
+                typeface,
+                12,
+                textBrush);
+
+            const double padX = 3, padY = 1;
+            var badgeW = text.Width + padX * 2;
+            var badgeH = text.Height + padY * 2;
+            var badge = new Rect(box.X, box.Y, badgeW, badgeH);
+
+            ctx.DrawRectangle(badgeFill, badgeStroke, badge);
+            ctx.DrawText(text, new Point(badge.X + padX, badge.Y + padY));
+        }
     }
 
     private bool TryRenderControlToPng(Control control, int maxDimension, out byte[] png, out string error)

@@ -78,6 +78,43 @@ public interface IUiAdapter
     /// <summary>The element's arranged bounds in its parent's coordinate space.</summary>
     UiRect GetBounds(object element);
 
+    /// <summary>
+    /// Maps <paramref name="element"/>'s rendered bounds into <paramref name="topLevel"/>'s
+    /// client coordinate space (device-independent pixels) — the box an overlay/annotation
+    /// should be drawn at. Returns <c>true</c> with the transformed <paramref name="rect"/>
+    /// when the element is laid out and shares a coordinate root with the top-level.
+    /// </summary>
+    /// <remarks>
+    /// The default implementation returns the element's <em>parent-relative</em> bounds
+    /// (from <see cref="GetBounds"/>) and reports <c>false</c>, because the neutral layer
+    /// cannot perform a framework coordinate transform. Adapters override this with a real
+    /// element-to-top-level transform so set-of-marks rendering and on-screen geometry are
+    /// accurate. Callers must treat a <c>false</c> result as "no usable on-screen box".
+    /// UI-thread only.
+    /// </remarks>
+    bool TryGetBoundsInTopLevel(object element, object topLevel, out UiRect rect)
+    {
+        rect = GetBounds(element);
+        return false;
+    }
+
+    /// <summary>
+    /// The accessibility ("semantic") view of <paramref name="element"/>: its automation
+    /// role, accessible name, value, whether it is interactive (clickable/editable/
+    /// togglable), and any active states (e.g. <c>"checked"</c>, <c>"disabled"</c>,
+    /// <c>"focused"</c>). This is what <c>get_semantic_tree</c> / <c>screenshot_marked</c>
+    /// surface so the model reasons about the UI the way a screen-reader would.
+    /// </summary>
+    /// <remarks>
+    /// The default implementation derives a best-effort view from the neutral metadata
+    /// already on the seam — the type name as the role and <see cref="GetName"/> as the
+    /// name, with no value, not interactive, and no states. Adapters override this to
+    /// consult the framework's UI-Automation peer for an accurate accessibility view.
+    /// UI-thread only.
+    /// </remarks>
+    UiSemanticInfo GetSemanticInfo(object element) =>
+        new(GetTypeName(element), GetName(element), null, false, Array.Empty<string>());
+
     /// <summary>Whether the element is effectively visible (and all ancestors are).</summary>
     bool IsEffectivelyVisible(object element);
 
@@ -127,6 +164,26 @@ public interface IUiAdapter
     /// UI-thread only.
     /// </summary>
     bool TryRenderToPng(object element, int maxDim, out byte[] png, out string error);
+
+    /// <summary>
+    /// Renders <paramref name="topLevel"/> to PNG honoring <paramref name="maxDim"/> (as
+    /// <see cref="TryRenderToPng"/> does) and then draws each <see cref="UiMark"/> as a
+    /// numbered box overlay — the "set-of-marks" image <c>screenshot_marked</c> returns.
+    /// Returns <c>false</c> with a reason in <paramref name="error"/> when rendering fails.
+    /// </summary>
+    /// <remarks>
+    /// <para>Each mark's <see cref="UiMark.Rect"/> is in <paramref name="topLevel"/> client
+    /// DIP coordinates (exactly what <see cref="TryGetBoundsInTopLevel"/> yields). The
+    /// adapter is responsible for applying its own render scale (DIP → device pixels) so the
+    /// boxes land on the right pixels in the downscaled image, and for drawing the mark
+    /// number legibly.</para>
+    /// <para>The default implementation falls back to a plain
+    /// <see cref="TryRenderToPng"/> render and <em>ignores</em> the marks, so an adapter
+    /// that has not implemented overlay drawing still produces a usable (un-annotated)
+    /// screenshot. Adapters override this to draw the numbered boxes. UI-thread only.</para>
+    /// </remarks>
+    bool TryRenderAnnotated(object topLevel, int maxDim, IReadOnlyList<UiMark> marks, out byte[] png, out string error) =>
+        TryRenderToPng(topLevel, maxDim, out png, out error);
 
     // ------------------------------------------------------------- automation
 

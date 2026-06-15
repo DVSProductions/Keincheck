@@ -51,4 +51,15 @@ public sealed class AvaloniaUiDispatcher : IUiDispatcher
         ArgumentNullException.ThrowIfNull(fn);
         await Dispatcher.UIThread.InvokeAsync(fn, DispatcherPriority.Normal);
     }
+
+    /// <inheritdoc />
+    public async Task WaitForIdle()
+    {
+        // Post a no-op at Background priority: the dispatcher only runs Background work
+        // AFTER all higher-priority queued items — including Layout and Render passes —
+        // have drained. Awaiting it is therefore a true "the UI has settled" barrier,
+        // not just the round-trip the default WaitForIdle provides. Always go through the
+        // queue (even when already on the UI thread) so pending layout/render still runs.
+        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background);
+    }
 }
