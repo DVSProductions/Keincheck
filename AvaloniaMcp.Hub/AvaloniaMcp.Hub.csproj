@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- The hub targets net10 but references the net8 Protocol lib; roll forward
+         so it runs on the installed .NET 10 runtime. -->
+    <RollForward>Major</RollForward>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+  </PropertyGroup>
+
+  <!-- The hub runs Kestrel in-process for the loopback MCP endpoint; it needs the
+       ASP.NET Core shared framework. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.0.4" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.0.4" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.4" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.4.0" />
+    <PackageReference Include="Velopack" Version="0.0.1298" />
+  </ItemGroup>
+
+  <!-- Tray icon asset (optional; the app runs without it). Embedded as an Avalonia
+       resource so AssetLoader can resolve avares://AvaloniaMcp.Hub/Assets/tray.ico. -->
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The hub speaks the wire Protocol to clients over the pipe. It does NOT
+         reference Core/Avalonia-introspection: tools execute inside each app, and
+         the hub advertises the schemas the client reports. -->
+    <ProjectReference Include="..\AvaloniaMcp.Protocol\AvaloniaMcp.Protocol.csproj" />
+  </ItemGroup>
+
+</Project>

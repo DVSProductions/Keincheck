@@ -1,0 +1,56 @@
+name: Release
+
+# Push a semver tag (e.g. v0.2.0) to build and publish a Velopack release to
+# GitHub. vpk creates the GitHub release, uploads the installer + update packages,
+# and (given a prior release) generates delta packages.
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Install vpk
+        run: dotnet tool install -g vpk
+
+      - name: Derive version from tag
+        id: ver
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish Hub (self-contained, win-x64)
+        run: >
+          dotnet publish AvaloniaMcp.Hub/AvaloniaMcp.Hub.csproj
+          -c Release -r win-x64 --self-contained true -o publish
+
+      - name: Download prior releases (for delta packages)
+        continue-on-error: true
+        run: vpk download github --repoUrl https://github.com/${{ github.repository }} --token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pack
+        run: >
+          vpk pack -u AvaloniaMcp.Hub -v ${{ steps.ver.outputs.version }}
+          -p publish -e AvaloniaMcp.Hub.exe
+          --packTitle "AvaloniaMcp Hub" --packAuthors "Valentino Saitz"
+
+      - name: Upload to GitHub release
+        run: >
+          vpk upload github --repoUrl https://github.com/${{ github.repository }}
+          --publish --merge
+          --releaseName "AvaloniaMcp Hub ${{ steps.ver.outputs.version }}"
+          --tag ${{ github.ref_name }}
+          --token ${{ secrets.GITHUB_TOKEN }}

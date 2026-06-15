@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- NuGet package metadata -->
+    <PackageId>AvaloniaMcp</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>AvaloniaMcp</Authors>
+    <Description>Embeds a Model Context Protocol (MCP) server into any Avalonia 12 app so an AI can see and drive the live UI.</Description>
+    <PackageTags>avalonia;mcp;ai;automation;ui</PackageTags>
+    <IncludeBuildOutput>true</IncludeBuildOutput>
+  </PropertyGroup>
+
+  <!--
+    The MCP host runs Kestrel in-process, which requires the ASP.NET Core
+    shared framework. A class library references it via FrameworkReference so
+    consuming apps do not need to add it themselves (the Demo does anyway).
+  -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Avalonia + ModelContextProtocol (core) flow transitively from Core; the
+         host adds only the ASP.NET Core MCP transport for in-process Kestrel. -->
+    <PackageReference Include="ModelContextProtocol.AspNetCore" Version="1.4.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AvaloniaMcp.Core\AvaloniaMcp.Core.csproj" />
+  </ItemGroup>
+
+</Project>

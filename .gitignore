@@ -1,0 +1,28 @@
+## .NET / build artifacts
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+*.user
+*.suo
+.vs/
+artifacts/
+publish/
+[Pp]ublish/
+
+## Velopack output
+Releases/
+*.shippackage
+
+## Rider / VS Code / Visual Studio
+.idea/
+.vscode/
+*.DotSettings.user
+
+## NuGet
+*.nupkg
+*.snupkg
+
+## OS
+.DS_Store
+Thumbs.db

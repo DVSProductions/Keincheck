@@ -1,0 +1,28 @@
+<Project>
+  <!--
+    This file deliberately does NOT import any parent Directory.Build.props.
+    It isolates the AvaloniaMcp solution from properties defined further up the
+    directory tree (e.g. a stray AvaloniaVersion=11.1.0). All Avalonia/MCP
+    versions are pinned explicitly in the individual csproj files.
+  -->
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <!-- Shared product / package metadata. Version is the single source of truth for
+       assembly versions; the Velopack release version is passed to `vpk pack -v`. -->
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+    <Authors>Valentino Saitz</Authors>
+    <Company>DVSProductions</Company>
+    <Product>AvaloniaMcp</Product>
+    <PackageProjectUrl>https://github.com/DVSProductions/AvaloniaMcp</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/DVSProductions/AvaloniaMcp.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+  </PropertyGroup>
+</Project>
