@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Platform;
 using Avalonia.Themes.Fluent;
+using Avalonia.Threading;
 
 namespace Keincheck.Hub;
 
@@ -53,6 +54,9 @@ public sealed class App : Application
                 _tray?.Dispose();
                 _vm?.Dispose();
             };
+
+            // Offer to wire Keincheck into Claude the first time, once everything is up.
+            Dispatcher.UIThread.Post(TryOfferFirstRunSetup, DispatcherPriority.Background);
         }
 
         base.OnFrameworkInitializationCompleted();
@@ -68,6 +72,8 @@ public sealed class App : Application
 
         var menu = new NativeMenu();
         menu.Add(open);
+        menu.Add(new NativeMenuItemSeparator());
+        menu.Add(BuildClaudeSetupMenu());
         menu.Add(new NativeMenuItemSeparator());
         menu.Add(quit);
 
@@ -89,6 +95,83 @@ public sealed class App : Application
         _window.Show();
         _window.WindowState = WindowState.Normal;
         _window.Activate();
+    }
+
+    /// <summary>The "Set up in Claude ▸ …" tray submenu — re-runnable, registers the MCP server.</summary>
+    private NativeMenuItem BuildClaudeSetupMenu()
+    {
+        var submenu = new NativeMenu();
+
+        var code = new NativeMenuItem("Claude Code");
+        code.Click += (_, _) => SetupClaude(ClaudeTarget.Code);
+
+        var desktopItem = new NativeMenuItem("Claude Desktop");
+        desktopItem.Click += (_, _) => SetupClaude(ClaudeTarget.Desktop);
+
+        var both = new NativeMenuItem("Both");
+        both.Click += (_, _) => SetupClaude(ClaudeTarget.Code, ClaudeTarget.Desktop);
+
+        submenu.Add(code);
+        submenu.Add(desktopItem);
+        submenu.Add(both);
+
+        return new NativeMenuItem("Set up in Claude") { Menu = submenu };
+    }
+
+    private void SetupClaude(params ClaudeTarget[] targets)
+    {
+        var connectExe = ClaudeMcpSetup.ResolveConnectExe();
+        if (connectExe is null)
+        {
+            ClaudeSetupUi.ShowNote("Keincheck",
+                "Could not locate keincheck-connect.exe. Set the KEINCHECK_CONNECT_EXE environment " +
+                "variable to its full path, or reinstall the hub so the bridge is co-located.");
+            return;
+        }
+        ClaudeSetupUi.RunAndShowResult(targets, connectExe);
+    }
+
+    /// <summary>
+    /// On first run, offer to register Keincheck in Claude — but only once (a marker file), and
+    /// only when it is not already configured anywhere. Best-effort; never throws into startup.
+    /// </summary>
+    private static void TryOfferFirstRunSetup()
+    {
+        try
+        {
+            var marker = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Keincheck", "claude-setup.offered");
+            if (File.Exists(marker))
+                return;
+
+            var connectExe = ClaudeMcpSetup.ResolveConnectExe();
+            if (connectExe is null)
+                return; // nothing to point Claude at
+
+            void MarkOffered()
+            {
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(marker)!);
+                    File.WriteAllText(marker, DateTimeOffset.UtcNow.ToString("o"));
+                }
+                catch { /* best-effort */ }
+            }
+
+            if (ClaudeMcpSetup.IsConfigured(ClaudeTarget.Code, connectExe)
+                || ClaudeMcpSetup.IsConfigured(ClaudeTarget.Desktop, connectExe))
+            {
+                MarkOffered(); // already set up somewhere — don't nag
+                return;
+            }
+
+            ClaudeSetupUi.ShowFirstRunOffer(connectExe, MarkOffered);
+        }
+        catch
+        {
+            // First-run convenience only; a failure here must never break the daemon.
+        }
     }
 
     private static WindowIcon? LoadTrayIcon()

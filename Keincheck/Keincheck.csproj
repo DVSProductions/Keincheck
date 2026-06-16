@@ -8,7 +8,7 @@
     <!-- NuGet package metadata -->
     <PackageId>Keincheck</PackageId>
     <IsPackable>true</IsPackable>
-    <Version>0.6.0</Version>
+    <Version>0.7.0</Version>
     <Authors>Keincheck</Authors>
     <Description>Embeds a Model Context Protocol (MCP) server into any Avalonia 12 app so an AI can see and drive the live UI.</Description>
     <PackageTags>avalonia;mcp;ai;automation;ui</PackageTags>
