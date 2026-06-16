@@ -22,7 +22,7 @@ public sealed class HubWindow : Window
         _vm = vm;
         DataContext = vm;
 
-        Title = "Keincheck Hub";
+        Title = $"Keincheck Hub {VersionLabel()}";
         Icon = LoadWindowIcon();
         Width = 640;
         Height = 520;
@@ -31,6 +31,9 @@ public sealed class HubWindow : Window
 
         Content = BuildLayout();
     }
+
+    /// <summary>The hub's version for display (e.g. "v0.8.0"), shared with the tray tooltip.</summary>
+    internal static string VersionLabel() => "v" + (HubMetaTools.ResolveHubAssemblyVersion() ?? "?");
 
     /// <summary>Loads the embedded logo for the taskbar / title-bar icon (best-effort).</summary>
     private static WindowIcon? LoadWindowIcon()
@@ -83,13 +86,27 @@ public sealed class HubWindow : Window
         Grid.SetRow(list, 1);
         root.Children.Add(list);
 
-        // --- audit header ---------------------------------------------------
-        var auditHeader = new TextBlock
+        // --- audit header (+ hub version on the right) ----------------------
+        var auditHeader = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            Margin = new Thickness(2, 12, 0, 4),
+        };
+        auditHeader.Children.Add(new TextBlock
         {
             Text = "Audit log — AI tool calls",
             FontWeight = FontWeight.SemiBold,
-            Margin = new Thickness(2, 12, 0, 4),
+        });
+        var version = new TextBlock
+        {
+            Text = $"Keincheck Hub {VersionLabel()}",
+            FontSize = 11,
+            Foreground = Brushes.Gray,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 2, 0),
         };
+        Grid.SetColumn(version, 1);
+        auditHeader.Children.Add(version);
         Grid.SetRow(auditHeader, 2);
         root.Children.Add(auditHeader);
 

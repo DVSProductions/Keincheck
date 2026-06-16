@@ -48,15 +48,15 @@ public sealed class App : Application
 
             BuildTray(desktop);
 
-            desktop.MainWindow = _window;
+            // Start TRAY-ONLY: the hub is a background daemon, so it must not pop a window on
+            // launch. The window is created but stays hidden until the user opens it from the
+            // tray (we deliberately do NOT set desktop.MainWindow, which would auto-show it;
+            // ShutdownMode.OnExplicitShutdown keeps the app alive with no window open).
             desktop.Exit += (_, _) =>
             {
                 _tray?.Dispose();
                 _vm?.Dispose();
             };
-
-            // Offer to wire Keincheck into Claude the first time, once everything is up.
-            Dispatcher.UIThread.Post(TryOfferFirstRunSetup, DispatcherPriority.Background);
         }
 
         base.OnFrameworkInitializationCompleted();
@@ -79,7 +79,7 @@ public sealed class App : Application
 
         _tray = new TrayIcon
         {
-            ToolTipText = "Keincheck Hub",
+            ToolTipText = $"Keincheck Hub {HubWindow.VersionLabel()}",
             Icon = LoadTrayIcon(),
             Menu = menu,
         };
@@ -95,6 +95,11 @@ public sealed class App : Application
         _window.Show();
         _window.WindowState = WindowState.Normal;
         _window.Activate();
+
+        // The first time the user opens the window, offer to wire Keincheck into Claude
+        // (once, marker-gated). Deferred to here — never on launch — so the hub stays
+        // tray-only until intentionally opened.
+        Dispatcher.UIThread.Post(TryOfferFirstRunSetup, DispatcherPriority.Background);
     }
 
     /// <summary>The "Set up in Claude ▸ …" tray submenu — re-runnable, registers the MCP server.</summary>

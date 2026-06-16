@@ -7,7 +7,7 @@
 
     <PackageId>Keincheck.Client</PackageId>
     <IsPackable>true</IsPackable>
-    <Version>0.8.0</Version>
+    <Version>0.8.1</Version>
     <Authors>Keincheck</Authors>
     <Description>The thin in-app broker client for Keincheck. Connects an Avalonia app to the standalone hub over a named pipe (no ASP.NET in the app), registers its Core tools, and runs invocations on the UI thread.</Description>
     <PackageTags>avalonia;mcp;ai;automation;ui;ipc</PackageTags>
