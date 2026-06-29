@@ -83,7 +83,18 @@ public sealed class HubPipeMcpListener : IAsyncDisposable
         await using var transport = new StreamServerTransport(input, output, _options.ServerName, loggerFactory: null);
         await using var server = McpServer.Create(transport, serverOptions, loggerFactory: null, serviceProvider: provider);
 
-        await server.RunAsync(ct).ConfigureAwait(false);
+        // Register this session's stable server for the lifetime of the session so it
+        // receives list-changed / log notifications, and remove it on disconnect. Do NOT
+        // register request.Server per tools/list — that wrapper is per-request and leaks.
+        _hub.RegisterSession(server);
+        try
+        {
+            await server.RunAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _hub.UnregisterSession(server);
+        }
     }
 
     private void ConfigureSessionServices(IServiceCollection services)

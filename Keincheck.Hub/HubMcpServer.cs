@@ -7,6 +7,9 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
+using System.Runtime.CompilerServices;
+
+[assembly: InternalsVisibleTo("Keincheck.Tests")]
 
 namespace Keincheck.Hub;
 
@@ -33,9 +36,24 @@ public sealed class HubMcpServer : IAsyncDisposable
     private readonly HubRecorder _recorder = new();
     private WebApplication? _web;
 
-    // The live MCP servers we can notify of list changes / log messages (each HTTP or
-    // pipe session registers its server here on first tools/list).
+    // The live MCP servers we can notify of list changes / log messages. Each session
+    // registers its stable server once at the transport boundary (see RegisterSession) and
+    // is removed when the session ends, so this stays bounded to the live session count.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<McpServer, byte> _servers = new();
+
+    // Number of live MCP sessions currently registered for notifications (test seam).
+    internal int ConnectedSessionCount => _servers.Count;
+
+    /// <summary>
+    /// Registers a live session's <b>stable</b> server so it receives list-changed / log
+    /// notifications; pair with <see cref="UnregisterSession"/> when the session ends. Call
+    /// once per session at the transport boundary (HubPipeMcpListener / the HTTP
+    /// RunSessionHandler), never per request: <c>request.Server</c> is a fresh per-request
+    /// wrapper, so adding it on every <c>tools/list</c> grew this set without bound.
+    /// </summary>
+    internal void RegisterSession(McpServer server) => _servers.TryAdd(server, 0);
+
+    internal void UnregisterSession(McpServer server) => _servers.TryRemove(server, out _);
 
     private HubMcpServer(IClientBroker broker, HubOptions options)
     {
@@ -68,8 +86,24 @@ public sealed class HubMcpServer : IAsyncDisposable
             k.Listen(System.Net.IPAddress.Loopback, _options.HttpPort));
         builder.Logging.SetMinimumLevel(LogLevel.Warning);
 
+        // MCPEXP002: RunSessionHandler is marked experimental by the SDK, but it is the only
+        // per-session start/completion hook. We use it to register each HTTP session's stable
+        // server for notifications and remove it when the session ends — the same lifecycle the
+        // pipe listener uses. Without it, HTTP sessions were only ever registered by the
+        // per-request tools/list add, which leaked unboundedly.
+#pragma warning disable MCPEXP002
         ConfigureMcp(builder.Services.AddMcpServer(ConfigureServerOptions))
-            .WithHttpTransport();
+            .WithHttpTransport(o =>
+            {
+                o.RunSessionHandler = async (_, server, ct) =>
+                {
+                    var mcp = (McpServer)server;
+                    RegisterSession(mcp);
+                    try { await mcp.RunAsync(ct).ConfigureAwait(false); }
+                    finally { UnregisterSession(mcp); }
+                };
+            });
+#pragma warning restore MCPEXP002
 
         _web = builder.Build();
         _web.MapMcp();
@@ -103,10 +137,9 @@ public sealed class HubMcpServer : IAsyncDisposable
     private ValueTask<ListToolsResult> HandleListToolsAsync(
         RequestContext<ListToolsRequestParams> request, CancellationToken ct)
     {
-        // Track this session's server so we can notify it of list changes / logs.
-        if (request.Server is { } srv)
-            _servers.TryAdd(srv, 0);
-
+        // Session registration happens once per session at the transport boundary
+        // (HubPipeMcpListener / the HTTP RunSessionHandler), NOT here: request.Server is a
+        // fresh per-request wrapper, so adding it on every tools/list leaked unboundedly.
         var result = new ListToolsResult { Tools = BuildToolList() };
         return ValueTask.FromResult(result);
     }
