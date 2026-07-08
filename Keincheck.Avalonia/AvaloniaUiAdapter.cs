@@ -454,6 +454,10 @@ public sealed class AvaloniaUiAdapter : IUiAdapter
         // side is clamped to maxDim; a non-positive request degrades to native (1).
         var renderScale = scale > 0 ? scale : 1;
 
+        // Let the host app draw capture-only content (e.g. composition custom visuals that
+        // RenderTargetBitmap never executes) for the duration of this render.
+        using var captureScope = ScreenshotCaptureHooks.Enter();
+
         if (element is TopLevel topLevel)
             return TryRenderVisualToPng(topLevel, maxDim, cropRect: null, renderScale, out png, out error);
         if (element is Control control)
@@ -496,6 +500,10 @@ public sealed class AvaloniaUiAdapter : IUiAdapter
 
         try
         {
+            // Same host-app capture hook as TryRenderToPng — annotated renders must show the
+            // same content as plain ones.
+            using var captureScope = ScreenshotCaptureHooks.Enter();
+
             // The RenderTargetBitmap's 96*scale DPI means its drawing context works in the
             // SAME DIP units as the visual; the device scaling is applied by the bitmap.
             // So marks (already in top-level client DIPs) are drawn at their DIP rects with
