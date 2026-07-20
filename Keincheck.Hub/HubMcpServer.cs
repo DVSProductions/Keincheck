@@ -20,7 +20,10 @@ namespace Keincheck.Hub;
 /// <c>tools/call</c> to the owning client via <see cref="IClientBroker.InvokeOnClientAsync"/>.
 /// Tool listing/dispatch is fully <b>dynamic</b> (handler hooks, not attribute
 /// scanning), so the catalog changes as the active client changes; an active/catalog
-/// change emits <c>notifications/tools/list_changed</c>. When a client drops, the hub
+/// change emits <c>notifications/tools/list_changed</c> — unless
+/// <see cref="HubOptions.DynamicTooling"/> is off (static tooling mode), in which case
+/// the catalog is fixed to the meta-tools and clients' tools stay reachable through the
+/// <c>hub_call_tool</c> generic proxy. When a client drops, the hub
 /// pushes an MCP logging notification naming <c>hub_restart_client</c>.
 /// </summary>
 /// <remarks>
@@ -114,9 +117,12 @@ public sealed class HubMcpServer : IAsyncDisposable
     {
         o.ServerInfo = new Implementation { Name = _options.ServerName, Version = _options.ServerVersion };
         o.Capabilities ??= new ServerCapabilities();
-        // Advertise that our tool list can change at runtime...
+        // Advertise that our tool list can change at runtime — but only in dynamic
+        // tooling mode. In static mode the catalog is fixed, so we neither advertise
+        // listChanged nor ever emit the notification (agents that cannot handle dynamic
+        // tool additions keep working against the stable meta-tool catalog).
         o.Capabilities.Tools ??= new ToolsCapability();
-        o.Capabilities.Tools.ListChanged = true;
+        o.Capabilities.Tools.ListChanged = _options.DynamicTooling;
         // ...and that we emit logging notifications (used to flag dropped clients).
         o.Capabilities.Logging ??= new LoggingCapability();
     }
@@ -146,8 +152,13 @@ public sealed class HubMcpServer : IAsyncDisposable
 
     private List<Tool> BuildToolList()
     {
-        // Meta-tools first (always present), then the active client's tools verbatim.
+        // Meta-tools first (always present). In dynamic tooling mode the active client's
+        // tools are appended verbatim; in static mode the catalog stops here, so it is
+        // identical for the whole session (client tools stay reachable via hub_call_tool).
         var tools = new List<Tool>(HubMetaTools.BuildCatalog());
+
+        if (!_options.DynamicTooling)
+            return tools;
 
         var activeId = _broker.ActiveClientId;
         if (activeId is not null && _broker.ClientStatus(activeId) is { IsConnected: true } active)
@@ -181,6 +192,11 @@ public sealed class HubMcpServer : IAsyncDisposable
         if (HandleRecordTool(name, args, ct) is { } recordResult)
             return await recordResult.ConfigureAwait(false);
 
+        // 1b) hub_call_tool — the static-mode generic proxy — unwraps { tool, args, client }
+        //     and joins the normal proxy path below.
+        if (name == HubMetaTools.CallTool)
+            return await HandleCallToolDispatchAsync(args, ct).ConfigureAwait(false);
+
         // 2) The remaining meta-tools are pure and dispatched in-hub.
         if (HubMetaTools.IsMetaTool(name))
         {
@@ -189,8 +205,47 @@ public sealed class HubMcpServer : IAsyncDisposable
                 .ConfigureAwait(false);
         }
 
-        // 3) Everything else is a proxied tool. Resolve the target client: an explicit
-        //    'client' argument overrides the active selection for this one call.
+        // 3) Everything else is a proxied tool.
+        return await InvokeProxiedToolAsync(name, args, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Unwraps a <c>hub_call_tool</c> call (<c>{ "tool": name, "args"?: {...},
+    /// "client"?: id }</c>) and forwards it through the standard proxy path. The
+    /// <c>client</c> member is re-attached to the forwarded arguments so the existing
+    /// per-call override (<see cref="ResolveTarget"/>) applies unchanged.
+    /// </summary>
+    private ValueTask<CallToolResult> HandleCallToolDispatchAsync(JsonElement? args, CancellationToken ct)
+    {
+        var tool = TryGetString(args, "tool");
+        if (string.IsNullOrEmpty(tool))
+        {
+            return ValueTask.FromResult(HubMetaTools.ErrorResult(
+                $"{HubMetaTools.CallTool} requires a 'tool' argument naming the client tool "
+                + $"to call (see {HubMetaTools.ListClientTools} for what a client offers)."));
+        }
+
+        JsonElement? forwarded = TryGetObject(args, "args");
+        if (args is { ValueKind: JsonValueKind.Object } o
+            && o.TryGetProperty(HubMetaTools.ClientOverrideArg, out var c)
+            && c.ValueKind == JsonValueKind.String)
+        {
+            forwarded = WithProperty(forwarded, HubMetaTools.ClientOverrideArg, c.GetString()!);
+        }
+
+        return InvokeProxiedToolAsync(tool!, forwarded, ct);
+    }
+
+    /// <summary>
+    /// The proxy path shared by directly-advertised client tools (dynamic mode) and
+    /// <c>hub_call_tool</c> (any mode): resolve the target client, forward the call with
+    /// the invoke timeout, capture the step when recording, and shape failures.
+    /// </summary>
+    private async ValueTask<CallToolResult> InvokeProxiedToolAsync(
+        string name, JsonElement? args, CancellationToken ct)
+    {
+        // Resolve the target client: an explicit 'client' argument overrides the active
+        // selection for this one call.
         var (targetId, toolArgs) = ResolveTarget(name, args);
         if (targetId is null)
         {
@@ -474,6 +529,26 @@ public sealed class HubMcpServer : IAsyncDisposable
             ? n
             : null;
 
+    /// <summary>Reads an object property from a JSON object arg, or null.</summary>
+    private static JsonElement? TryGetObject(JsonElement? args, string prop) =>
+        args is { ValueKind: JsonValueKind.Object } o
+        && o.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.Object
+            ? v.Clone()
+            : null;
+
+    /// <summary>Returns <paramref name="obj"/> (or an empty object) with one string property added/replaced.</summary>
+    private static JsonElement WithProperty(JsonElement? obj, string name, string value)
+    {
+        var node = new System.Text.Json.Nodes.JsonObject();
+        if (obj is { ValueKind: JsonValueKind.Object } o)
+        {
+            foreach (var prop in o.EnumerateObject())
+                node[prop.Name] = System.Text.Json.Nodes.JsonNode.Parse(prop.Value.GetRawText());
+        }
+        node[name] = value;
+        return JsonSerializer.SerializeToElement(node);
+    }
+
     /// <summary>
     /// Picks the client a proxied call targets. A literal <c>client</c> property in the
     /// arguments wins (and is stripped from the args forwarded to the tool); otherwise
@@ -521,7 +596,13 @@ public sealed class HubMcpServer : IAsyncDisposable
 
     private void OnClientConnected(object? sender, ClientInfo info) => OnCatalogMayHaveChanged(sender, info);
 
-    private void RaiseListChanged() => _ = NotifyToolListChangedAsync();
+    private void RaiseListChanged()
+    {
+        // Static tooling mode: the catalog never changes, so never emit list_changed.
+        if (!_options.DynamicTooling)
+            return;
+        _ = NotifyToolListChangedAsync();
+    }
 
     /// <summary>
     /// Emits <c>notifications/tools/list_changed</c> to every connected MCP session.

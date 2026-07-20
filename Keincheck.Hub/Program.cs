@@ -34,6 +34,10 @@ public static class Program
         {
             // Advertise the real build on the MCP initialize handshake (not a hardcoded stub).
             ServerVersion = HubMetaTools.ResolveHubAssemblyVersion() ?? "0.0.0",
+            // Static tooling mode (--static-tools or KEINCHECK_STATIC_TOOLS=1): the MCP
+            // tool list never changes — agents that cannot handle dynamic tool additions
+            // discover/call client tools via hub_list_client_tools / hub_call_tool instead.
+            DynamicTooling = !StaticToolingRequested(args),
         };
         var brokerOptions = new BrokerOptions
         {
@@ -69,6 +73,21 @@ public static class Program
             HubRuntime.StopAsync().GetAwaiter().GetResult();
             broker.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
+    }
+
+    /// <summary>True when static tooling mode was requested via CLI flag or environment.</summary>
+    private static bool StaticToolingRequested(string[] args)
+    {
+        foreach (var a in args)
+        {
+            if (string.Equals(a, "--static-tools", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(a, "--no-dynamic-tools", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        var env = Environment.GetEnvironmentVariable("KEINCHECK_STATIC_TOOLS");
+        return env is "1" || string.Equals(env, "true", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Builds the Avalonia app, injecting the live broker into the tray UI.</summary>
