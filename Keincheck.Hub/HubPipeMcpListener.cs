@@ -108,7 +108,10 @@ public sealed class HubPipeMcpListener : IAsyncDisposable
                 Version = _options.ServerVersion,
             };
             o.Capabilities ??= new ModelContextProtocol.Protocol.ServerCapabilities();
-            o.Capabilities.Tools ??= new ModelContextProtocol.Protocol.ToolsCapability { ListChanged = true };
+            o.Capabilities.Tools ??= new ModelContextProtocol.Protocol.ToolsCapability();
+            // Mirrors HubMcpServer.ConfigureServerOptions: static mode advertises no
+            // listChanged capability and the catalog never changes.
+            o.Capabilities.Tools.ListChanged = _options.DynamicTooling;
         });
         _hub.ConfigureMcp(mcp);
     }

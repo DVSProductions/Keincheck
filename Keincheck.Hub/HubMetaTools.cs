@@ -43,12 +43,22 @@ internal static class HubMetaTools
     public const string Replay       = "hub_replay";
     public const string ExportTest   = "hub_export_test";
 
+    // Static-tooling meta-tools. hub_call_tool is the generic proxy every client tool can
+    // be reached through when the hub runs in static mode (or when a client tool is not
+    // advertised for any other reason); like the record tools it is ROUTED in
+    // HubMcpServer.HandleCallToolAsync, because it needs the server's proxy/invoke path.
+    // hub_list_client_tools is the discovery companion: it reports a client's tool
+    // descriptors without relying on tools/list_changed.
+    public const string CallTool        = "hub_call_tool";
+    public const string ListClientTools = "hub_list_client_tools";
+
     /// <summary>True if <paramref name="name"/> is one of the hub's own meta-tools.</summary>
     public static bool IsMetaTool(string name) => name switch
     {
         ListClients or ListKnownClients or LaunchClient or RestartClient
             or SelectClient or ClientStatus or WaitForClient or Status or Guide
-            or RecordStart or RecordStop or RecordStatus or Replay or ExportTest => true,
+            or RecordStart or RecordStop or RecordStatus or Replay or ExportTest
+            or CallTool or ListClientTools => true,
         _ => false,
     };
 
@@ -91,8 +101,9 @@ internal static class HubMetaTools
             ClientIdSchema());
 
         yield return Meta(SelectClient,
-            "Make a client active so its tools are advertised (emits "
-            + "tools/list_changed). Args: { \"clientId\": string }.",
+            "Make a client active. Dynamic tooling mode: its tools are advertised (emits "
+            + "tools/list_changed). Static tooling mode: hub_call_tool defaults to it. "
+            + "Args: { \"clientId\": string }.",
             ClientIdSchema());
 
         yield return Meta(ClientStatus,
@@ -141,6 +152,24 @@ internal static class HubMetaTools
             + "[Fact] skeleton (a starting point, not guaranteed to compile). "
             + "Args: { \"format\"?: \"json\" | \"csharp\" (default \"json\") }.",
             ExportTestSchema());
+
+        // ---- static-tooling companions ----
+        // hub_call_tool is routed in HubMcpServer (it needs the proxy path); advertised here.
+
+        yield return Meta(ListClientTools,
+            "List the tool descriptors (name, description, input schema) one client "
+            + "currently offers — the discovery path that does NOT rely on "
+            + "tools/list_changed. Args: { \"clientId\"?: string } (defaults to the active "
+            + "client).",
+            OptionalClientIdSchema());
+
+        yield return Meta(CallTool,
+            "Call ANY tool of a client through the hub, by name — the fallback for agents "
+            + "that do not support dynamic tool lists (static tooling mode), where client "
+            + "tools are never advertised directly. Args: { \"tool\": string, "
+            + "\"args\"?: object, \"client\"?: string } ('client' overrides the active "
+            + "client for this one call).",
+            CallToolSchema(), readOnly: false);
     }
 
     // ---- dispatch ---------------------------------------------------------
@@ -193,6 +222,28 @@ internal static class HubMetaTools
                 return info is null
                     ? DownClientError(id, "is not known to the hub")
                     : JsonResult(ToView(info, LiveIds(broker)));
+            }
+
+            case ListClientTools:
+            {
+                // clientId is optional: omit it to inspect the active client.
+                var id = TryGetStringProp(args, "clientId") ?? broker.ActiveClientId;
+                if (id is null)
+                    return ErrorResult(
+                        $"No active client selected. Call {SelectClient} first, or pass a 'clientId' argument.");
+                var info = broker.ClientStatus(id);
+                if (info is null)
+                    return DownClientError(id, "is not known to the hub");
+                return JsonResult(new
+                {
+                    clientId = id,
+                    tools = info.Tools.Select(t => new
+                    {
+                        name = t.Name,
+                        description = t.Description,
+                        inputSchema = t.InputSchema,
+                    }),
+                });
             }
 
             case WaitForClient:
@@ -319,6 +370,22 @@ To block until it is back, call `hub_wait_for_client { "appId": "myapp" }`.
   proxied UI tool calls you make.
 - `hub_replay { stopOnError?, delayMs? }` — re-issue the recorded steps.
 - `hub_export_test { format? }` — export the recording as `json` or a `csharp` xUnit skeleton.
+- `hub_list_client_tools { clientId? }` — list a client's tool descriptors (name,
+  description, input schema) without relying on `tools/list_changed`.
+- `hub_call_tool { tool, args?, client? }` — call any client tool by name through the hub.
+
+## Static tooling mode
+
+Some agents cannot handle a tool list that changes mid-session (they ignore
+`notifications/tools/list_changed`, so dynamically added client tools never appear for
+them). The hub can be started in **static tooling mode** (`--static-tools` flag or
+`KEINCHECK_STATIC_TOOLS=1`): then the tool list NEVER changes — only the meta-tools are
+advertised, and no list-changed notifications are emitted. In that mode:
+
+1. Discover tools with `hub_list_client_tools` (per client, returns names + schemas).
+2. Call them through `hub_call_tool`, e.g.
+   `hub_call_tool({ "tool": "query_controls", "args": { "selector": "Button" } })`.
+   The `"client"` argument targets a specific client; omit it to use the active one.
 
 ## Typical UI tools (provided by the active app)
 
@@ -546,5 +613,15 @@ coordinates and is robust to layout shifts.
     public static JsonElement ExportTestSchema() =>
         JsonDocument.Parse(
             """{"type":"object","properties":{"format":{"type":"string","enum":["json","csharp"],"description":"Output format: a replayable JSON scenario, or an xUnit [Fact] skeleton."}}}""")
+            .RootElement.Clone();
+
+    public static JsonElement OptionalClientIdSchema() =>
+        JsonDocument.Parse(
+            """{"type":"object","properties":{"clientId":{"type":"string","description":"The hub-assigned client id (defaults to the active client)."}}}""")
+            .RootElement.Clone();
+
+    public static JsonElement CallToolSchema() =>
+        JsonDocument.Parse(
+            """{"type":"object","properties":{"tool":{"type":"string","description":"The client tool to call (see hub_list_client_tools)."},"args":{"type":"object","description":"The arguments to pass to the tool."},"client":{"type":"string","description":"Optional: target this client instead of the active one for this call."}},"required":["tool"]}""")
             .RootElement.Clone();
 }
