@@ -108,6 +108,8 @@ frameworks without style classes match nothing.
 | `Keincheck.Client` | net8.0 | **Framework-free** broker client (`BrokerClientHost.Start`) — named-pipe, **no ASP.NET** |
 | `Keincheck.Hub` | net10.0 | The broker daemon: pipe server, registry, launcher/restart, MCP proxy, tray (Velopack) |
 | `Keincheck.Connect` | net8.0 | The stdio shim an MCP client spawns |
+| `Keincheck.Remote` | net8.0 | **Opt-in** mutual-TLS transport for attaching apps on *other machines* — see [Remote](#remote) |
+| `Keincheck.Enroll` | net8.0 | `keincheck-enroll`, which asks the local hub for a remote credential |
 | `Keincheck` | net8.0 | Embedded all-in-one server (`UseMcpServer`) — Core + the Avalonia adapter |
 | `samples/Keincheck.Demo` | net10.0 | Demo Avalonia app wired as a client |
 | `tests/*` | net8.0 / net10.0 | xUnit + Avalonia.Headless |
@@ -146,6 +148,86 @@ vpk pack -u Keincheck.Hub -v 0.2.0 -p publish -e Keincheck.Hub.exe --packTitle "
 vpk upload github --repoUrl https://github.com/DVSProductions/Keincheck --publish --releaseName "Keincheck Hub 0.2.0" --tag v0.2.0 --token <gh-token>
 ```
 
+## Remote
+
+By default the hub only sees apps on its own machine — the control pipe is a local,
+current-user-only channel. **`Keincheck.Remote` lets a hub broker apps running elsewhere**:
+inspect and drive an Avalonia app on another box from the AI session on yours, through the
+same tools. A remote client is just a client that happens to have a host.
+
+**It is a separate package on purpose.** An app that does not reference `Keincheck.Remote`
+links no socket or TLS code at all, so remote debuggability can never be switched on by
+accident or left behind as latent attack surface. And a hub only listens once an operator
+explicitly enables it.
+
+### Setting it up
+
+**1. Turn on the listener** (hub tray ▸ *Remote access…*, or `hub_remote_enable`). The first
+time, this generates the hub's own certificate authority.
+
+**2. Issue a credential** for the machine that will connect. Three equivalent ways — the MCP
+tool, the hub window, or the CLI:
+
+```
+hub_remote_issue { "target": "OP3R4T0RV2" }
+```
+
+```sh
+keincheck-enroll --target OP3R4T0RV2 --out cred.txt
+```
+
+All three carry the same authorization — anything running as you — so none is privileged over
+the others. A build can do it automatically:
+
+```xml
+<PropertyGroup>
+  <KeincheckRemoteEnroll>true</KeincheckRemoteEnroll>
+  <KeincheckRemoteTarget>OP3R4T0RV2</KeincheckRemoteTarget>
+</PropertyGroup>
+```
+
+**3. Point the app at the hub.** Install `Keincheck.Remote` and set the connector:
+
+```csharp
+builder.UseMcpClient(o =>
+{
+    o.AppId = "protoface";
+    o.Connector = RemoteChannelConnector.FromEnvironment();   // KEINCHECK_REMOTE[_FILE]
+});
+```
+
+Over a tunnel — the suit has no inbound route, so forward a port and let the client dial:
+
+```sh
+ssh -R 7423:127.0.0.1:7423 OP3R4T0RV2      # from the dev box
+```
+
+The client then appears as `protoface@OP3R4T0RV2#1` in `hub_list_clients` and is driven with
+exactly the same tools as a local app. **No new AI-facing tools for driving** — only
+`hub_remote_status` / `enable` / `disable` / `issue` / `revoke` for administering the listener.
+
+### What protects it
+
+- **Mutual TLS.** The hub refuses any client it did not issue a certificate to, and the client
+  refuses any hub that does not hold the CA it enrolled against. The second half matters as
+  much as the first: tool *results* carry screenshots and full UI trees.
+- **Identity from the credential.** A client's host label is the common name of the
+  certificate the hub validated — not self-reported, and not read off the socket (which is
+  always loopback through a tunnel anyway).
+- **Read-only by default.** Remote clients start read-only, and lifting it is session-scoped —
+  it returns on reconnect. Looking at the suit is always safe; driving it is a deliberate act.
+- **Never auto-selected.** Tool calls go to whichever client is active, so a remote client is
+  never made active automatically — that would let whatever attached first receive your calls.
+- **Cannot be launched.** The hub refuses to launch or restart a remote client rather than
+  risk starting a *local* copy while you believe you restarted the remote one.
+- **Revocable.** A credential baked into a shipped build is extractable from that build.
+  Every issued credential is listed and can be revoked; it stops working on the next connect.
+- **Audited.** Attach, detach, auth failure, issuance and revocation are recorded, and once
+  remote is enabled the trail is also written to `%APPDATA%\Keincheck\audit\*.jsonl`.
+
+Binding a non-loopback address is allowed — mutual TLS, not the network boundary, is what
+protects the hub — but it is always an explicit choice, and you will need a firewall rule.
+
 ## Security
 
 Keincheck grants full programmatic control of an app's UI. It is designed for
@@ -157,6 +239,13 @@ Keincheck grants full programmatic control of an app's UI. It is designed for
 - **Embedded:** the listener is **loopback only** (never `0.0.0.0`), but there is **no auth
   token** — any local process can drive the app. Enable it only in development / trusted
   contexts, ideally behind a debug-only flag.
+- **Remote:** off unless enabled, then mutually-authenticated TLS — see [Remote](#remote).
+  Note the boundary this does *not* move: anything already running as your user can read the
+  hub's CA from `%APPDATA%` and mint credentials, exactly as it can already drive every
+  registered app through the control pipe. Every local issuance path (MCP tool, tray window,
+  `keincheck-enroll`) sits at that same boundary and is treated identically. The line that
+  *is* drawn is by transport: a **remote** client can never mint further credentials, so one
+  leaked build certificate cannot become a self-renewing grant.
 
 ## License
 
