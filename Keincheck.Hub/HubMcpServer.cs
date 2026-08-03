@@ -121,6 +121,20 @@ public sealed class HubMcpServer : IAsyncDisposable
         {
             foreach (var d in active.Tools)
             {
+                // A client's tool catalog is entirely client-authored, so it can contain a
+                // name that collides with one of the hub's own. Dispatch is already safe —
+                // IsMetaTool is checked first, so the real meta-tool always runs — but
+                // advertising the duplicate is both an MCP protocol violation and a way to put
+                // an attacker-written description for, say, hub_remote_issue into the model's
+                // context. Skip the shadow instead.
+                if (!_options.QualifyToolNames && HubMetaTools.IsMetaTool(d.Name))
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[Hub] client '{active.ClientId}' advertises '{d.Name}', which collides " +
+                        "with a hub meta-tool; not advertising it.");
+                    continue;
+                }
+
                 var name = _options.QualifyToolNames ? $"{active.ClientId}.{d.Name}" : d.Name;
                 tools.Add(new Tool
                 {

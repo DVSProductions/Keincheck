@@ -153,6 +153,14 @@ public sealed class RemoteChannelConnector : IChannelConnector, IDisposable
     public string Describe() => $"tls {_endpoint} as '{_credential.Host}'";
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// A remote session genuinely needs v2 — it opens with a Hello the older protocol has no
+    /// message kind for. Unlike the pipe, a version mismatch here is reported to the peer with
+    /// a reason before the connection closes.
+    /// </remarks>
+    public int AdvertisedProtocolVersion => ProtocolVersion.Current;
+
+    /// <inheritdoc/>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)

@@ -46,7 +46,7 @@ public class FrameCompressionTests
         var payload = Compressible(200_000);
         using var ms = new MemoryStream();
 
-        await FrameCodec.WriteAsync(ms, payload, compress: true);
+        await FrameCodec.WriteAsync(ms, payload, FrameCodec.DefaultMaxChunkPayload, compress: true);
         Assert.True(FirstChunkIsCompressed(ms.ToArray()));
         Assert.True(ms.Length < payload.Length / 2, "compressible payload should shrink a lot");
 
@@ -76,10 +76,10 @@ public class FrameCompressionTests
         var payload = Compressible(50_000);
 
         using var sync = new MemoryStream();
-        FrameCodec.Write(sync, payload, compress: true);
+        FrameCodec.Write(sync, payload, FrameCodec.DefaultMaxChunkPayload, compress: true);
 
         using var async = new MemoryStream();
-        await FrameCodec.WriteAsync(async, payload, compress: true);
+        await FrameCodec.WriteAsync(async, payload, FrameCodec.DefaultMaxChunkPayload, compress: true);
 
         Assert.Equal(sync.ToArray(), async.ToArray());
     }
@@ -111,7 +111,7 @@ public class FrameCompressionTests
         var payload = Compressible(FrameCodec.CompressionThreshold);
         using var ms = new MemoryStream();
 
-        await FrameCodec.WriteAsync(ms, payload, compress: true);
+        await FrameCodec.WriteAsync(ms, payload, FrameCodec.DefaultMaxChunkPayload, compress: true);
 
         Assert.False(FirstChunkIsCompressed(ms.ToArray()));
         Assert.Equal(payload.Length + FrameCodec.ChunkHeaderSize, ms.Length);
@@ -127,7 +127,7 @@ public class FrameCompressionTests
         var payload = Incompressible(100_000);
         using var ms = new MemoryStream();
 
-        await FrameCodec.WriteAsync(ms, payload, compress: true);
+        await FrameCodec.WriteAsync(ms, payload, FrameCodec.DefaultMaxChunkPayload, compress: true);
 
         Assert.False(FirstChunkIsCompressed(ms.ToArray()));
 

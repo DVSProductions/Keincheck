@@ -34,7 +34,24 @@ public sealed class PipeChannel : IAsyncDisposable, IDisposable
     /// Framing bounds; <see cref="ChannelLimits.Default"/> when omitted. A remote listener
     /// passes <see cref="ChannelLimits.Handshake"/> and widens it after accepting the session.
     /// </param>
-    public PipeChannel(Stream stream, bool ownsStream = true, ChannelLimits? limits = null)
+    /// <remarks>
+    /// Kept as the exact pre-v2 signature. Adding an optional parameter to this constructor
+    /// instead would have broken binary compatibility with the published package: an assembly
+    /// compiled against 0.9.0 would fail with <c>MissingMethodException</c> at runtime.
+    /// </remarks>
+    public PipeChannel(Stream stream, bool ownsStream = true)
+        : this(stream, ownsStream, null)
+    {
+    }
+
+    /// <inheritdoc cref="PipeChannel(Stream, bool)"/>
+    /// <param name="stream">The transport to wrap.</param>
+    /// <param name="ownsStream">Whether disposing the channel disposes the stream.</param>
+    /// <param name="limits">
+    /// Framing bounds; <see cref="ChannelLimits.Default"/> when null. A remote listener passes
+    /// <see cref="ChannelLimits.Handshake"/> and widens it after accepting the session.
+    /// </param>
+    public PipeChannel(Stream stream, bool ownsStream, ChannelLimits? limits)
     {
         _stream = stream ?? throw new ArgumentNullException(nameof(stream));
         _ownsStream = ownsStream;
@@ -74,8 +91,8 @@ public sealed class PipeChannel : IAsyncDisposable, IDisposable
             await FrameCodec.WriteAsync(
                 _stream, bytes,
                 limits.MaxChunkPayload,
-                cancellationToken,
-                compress: limits.AllowCompression).ConfigureAwait(false);
+                compress: limits.AllowCompression,
+                cancellationToken).ConfigureAwait(false);
         }
         finally
         {

@@ -40,6 +40,32 @@ public interface IChannelConnector
 
     /// <summary>A short, non-secret description of the target, for logs and error messages.</summary>
     string Describe();
+
+    /// <summary>
+    /// The protocol version the client should advertise in its <see cref="RegisterMessage"/>
+    /// on this transport.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A client must advertise the lowest version that covers what it actually <i>uses</i>, not
+    /// the newest it knows about — otherwise a routine package update becomes an outage.
+    /// </para>
+    /// <para>
+    /// On the local pipe a v2 client uses nothing v2-specific: Register, ToolList, InvokeTool
+    /// and ToolResult are byte-identical to v1, <see cref="ToolDescriptor.ReadOnly"/> is an
+    /// additive field an older hub ignores, and compression is never enabled without a
+    /// handshake the pipe does not perform. Advertising v2 there would have made an older hub
+    /// compute <c>IsCompatible(2) == false</c> and drop the connection without a word — so
+    /// updating the client package before the hub auto-updated would look like "my app just
+    /// stopped connecting". It therefore advertises <see cref="ProtocolVersion.Minimum"/>.
+    /// </para>
+    /// <para>
+    /// A remote transport advertises <see cref="ProtocolVersion.Current"/>, because its
+    /// handshake genuinely requires v2 — and there, a mismatch is reported to the peer with a
+    /// reason instead of dropping the connection silently.
+    /// </para>
+    /// </remarks>
+    int AdvertisedProtocolVersion => ProtocolVersion.Minimum;
 }
 
 /// <summary>

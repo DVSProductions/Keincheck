@@ -70,11 +70,27 @@ public static class FrameCodec
     /// more chunks (splitting at <paramref name="maxChunkPayload"/>) and flushes.
     /// Synchronous; suitable for small control messages.
     /// </summary>
+    /// <remarks>
+    /// Kept as the exact pre-v2 signature. Adding an optional parameter to it instead would
+    /// have changed the signature callers are compiled against, so an assembly built against
+    /// the published 0.9.0 package would fail with <c>MissingMethodException</c> at runtime —
+    /// a source-compatible change that is not binary-compatible.
+    /// </remarks>
     public static void Write(
         Stream stream,
         ReadOnlySpan<byte> payload,
-        int maxChunkPayload = DefaultMaxChunkPayload,
-        bool compress = false)
+        int maxChunkPayload = DefaultMaxChunkPayload)
+        => Write(stream, payload, maxChunkPayload, compress: false);
+
+    /// <summary>
+    /// Writes <paramref name="payload"/> as one or more chunks, optionally Brotli-compressing
+    /// the frame first. Only compress when the peer has advertised support for it.
+    /// </summary>
+    public static void Write(
+        Stream stream,
+        ReadOnlySpan<byte> payload,
+        int maxChunkPayload,
+        bool compress)
     {
         ArgumentNullException.ThrowIfNull(stream);
         if (maxChunkPayload <= 0)
@@ -109,12 +125,27 @@ public static class FrameCodec
     /// flushes. Prefer this over the synchronous overload on real network/pipe
     /// transports.
     /// </summary>
-    public static async Task WriteAsync(
+    /// <remarks>
+    /// Kept as the exact pre-v2 signature for binary compatibility with the published package;
+    /// see the note on the synchronous <see cref="Write(Stream, ReadOnlySpan{byte}, int)"/>.
+    /// </remarks>
+    public static Task WriteAsync(
         Stream stream,
         ReadOnlyMemory<byte> payload,
         int maxChunkPayload = DefaultMaxChunkPayload,
-        CancellationToken cancellationToken = default,
-        bool compress = false)
+        CancellationToken cancellationToken = default)
+        => WriteAsync(stream, payload, maxChunkPayload, compress: false, cancellationToken);
+
+    /// <summary>
+    /// Writes <paramref name="payload"/> as one or more chunks, optionally Brotli-compressing
+    /// the frame first. Only compress when the peer has advertised support for it.
+    /// </summary>
+    public static async Task WriteAsync(
+        Stream stream,
+        ReadOnlyMemory<byte> payload,
+        int maxChunkPayload,
+        bool compress,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(stream);
         if (maxChunkPayload <= 0)

@@ -82,7 +82,8 @@ public sealed class BrokerClient : IAsyncDisposable
                 await using var channel = session.Channel;
 
                 backoff = TimeSpan.FromMilliseconds(250); // reset after a good connect
-                await ServeAsync(channel, session.ReadTimeout, ct).ConfigureAwait(false);
+                await ServeAsync(channel, session.ReadTimeout, connector.AdvertisedProtocolVersion, ct)
+                    .ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -113,7 +114,8 @@ public sealed class BrokerClient : IAsyncDisposable
         }
     }
 
-    private async Task ServeAsync(PipeChannel channel, TimeSpan? readTimeout, CancellationToken ct)
+    private async Task ServeAsync(
+        PipeChannel channel, TimeSpan? readTimeout, int protocolVersion, CancellationToken ct)
     {
         // 1. Register.
         await channel.SendAsync(MessageKind.Register, new RegisterMessage
@@ -121,7 +123,11 @@ public sealed class BrokerClient : IAsyncDisposable
             ClientId = _clientId,
             DisplayName = _displayName,
             ProcessId = Environment.ProcessId,
-            ProtocolVersion = ProtocolVersion.Current,
+            // The transport decides. On the pipe this is v1: nothing in a pipe session uses a
+            // v2 feature, and claiming v2 would make an OLDER hub drop the connection with no
+            // explanation -- turning a client-package update into a silent outage for anyone
+            // whose hub had not auto-updated yet.
+            ProtocolVersion = protocolVersion,
             OwnsWindows = await OwnsWindowsAsync(ct).ConfigureAwait(false),
             ClientVersion = ClientAssemblyVersion,
         }, cancellationToken: ct).ConfigureAwait(false);

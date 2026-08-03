@@ -47,6 +47,11 @@ public sealed class RemoteClientListener : IAsyncDisposable
     private int _pending;
     private int _disposed;
 
+    // In-flight handshake tasks, so shutdown can wait for them instead of disposing the
+    // cancellation source and the certificates out from under them.
+    private readonly object _inFlightGate = new();
+    private readonly HashSet<Task> _inFlight = [];
+
     public RemoteClientListener(
         PipeClientBroker broker, RemoteStore store, HubAuditLog audit, Action<string>? log = null)
     {
@@ -152,7 +157,7 @@ public sealed class RemoteClientListener : IAsyncDisposable
                 // a peer that connects and then says nothing would stall every other client.
                 // Accept the socket first, and hand the handshake to its own task.
                 var accepted = await listener.AcceptTcpClientAsync(_cts.Token).ConfigureAwait(false);
-                _ = HandleAsync(accepted);
+                Track(HandleAsync(accepted));
             }
             catch (OperationCanceledException)
             {
@@ -172,9 +177,35 @@ public sealed class RemoteClientListener : IAsyncDisposable
         }
     }
 
+    /// <summary>Registers a session task so shutdown can wait for it, and unregisters on completion.</summary>
+    private void Track(Task session)
+    {
+        lock (_inFlightGate)
+            _inFlight.Add(session);
+
+        _ = session.ContinueWith(t =>
+        {
+            lock (_inFlightGate)
+                _inFlight.Remove(t);
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    }
+
     private async Task HandleAsync(TcpClient tcp)
     {
-        var peer = (tcp.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString() ?? "unknown";
+        // Read the peer address INSIDE the try: on a socket that died between accept and here,
+        // RemoteEndPoint throws, and outside the try that would leak the TcpClient and leave
+        // the exception unobserved.
+        string peer;
+        try
+        {
+            peer = (tcp.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString() ?? "unknown";
+        }
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException)
+        {
+            tcp.Dispose();
+            return;
+        }
+
 
         // Cheap rejections first, before spending a TLS handshake on them.
         if (Interlocked.Increment(ref _pending) > MaxPendingSessions)
@@ -207,6 +238,16 @@ public sealed class RemoteClientListener : IAsyncDisposable
             }
 
             await HandshakeAndServeAsync(tcp, peer, ReleaseSlot).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (IsShuttingDown(ex))
+        {
+            // The hub is stopping, not being attacked. Recording this as an authentication
+            // failure would put a LEGITIMATE client in the security audit trail with a cause
+            // ("Cannot access a disposed object") that has nothing to do with authentication —
+            // and every hub restart would leave a few of them behind to mislead whoever reads
+            // the log later.
+            _log?.Invoke($"dropped the session from {peer} during shutdown.");
+            try { tcp.Dispose(); } catch { /* ignore */ }
         }
         catch (Exception ex)
         {
@@ -383,7 +424,22 @@ public sealed class RemoteClientListener : IAsyncDisposable
     {
         public int Count;
         public DateTimeOffset BlockedUntil;
+        public DateTimeOffset LastSeen = DateTimeOffset.UtcNow;
     }
+
+    /// <summary>
+    /// How long a peer's failure record is kept after its last failure.
+    /// </summary>
+    /// <remarks>
+    /// Records used to be removed only on a <i>successful</i> handshake, so a peer that never
+    /// succeeded left one behind forever. Bound to a public interface for months — the runtime
+    /// this is designed for — that is one permanent entry per distinct probing source address,
+    /// and over IPv6 an attacker on a /64 has effectively unlimited addresses.
+    /// </remarks>
+    public static readonly TimeSpan FailureRetention = TimeSpan.FromMinutes(30);
+
+    /// <summary>How many failure records to keep before pruning aggressively.</summary>
+    public const int MaxTrackedPeers = 1024;
 
     private bool IsBackedOff(string peer)
         => _failures.TryGetValue(peer, out var record) && DateTimeOffset.UtcNow < record.BlockedUntil;
@@ -394,15 +450,39 @@ public sealed class RemoteClientListener : IAsyncDisposable
         lock (record)
         {
             record.Count++;
+            record.LastSeen = DateTimeOffset.UtcNow;
             if (record.Count >= FailuresBeforeBackoff)
             {
                 record.BlockedUntil = DateTimeOffset.UtcNow + BackoffWindow;
                 record.Count = 0;
             }
         }
+
+        PruneFailures();
     }
 
     private void ClearFailures(string peer) => _failures.TryRemove(peer, out _);
+
+    /// <summary>Drops records that are stale and no longer blocking anyone.</summary>
+    private void PruneFailures()
+    {
+        if (_failures.Count <= MaxTrackedPeers)
+            return;
+
+        var now = DateTimeOffset.UtcNow;
+        foreach (var (peer, record) in _failures)
+        {
+            // Never drop a record that is currently enforcing a backoff — that would hand a
+            // probing peer a way to clear its own penalty by making more noise.
+            if (now >= record.BlockedUntil && now - record.LastSeen > FailureRetention)
+                _failures.TryRemove(peer, out _);
+        }
+    }
+
+    /// <summary>True when an exception is just the listener being torn down.</summary>
+    private bool IsShuttingDown(Exception ex) =>
+        _cts.IsCancellationRequested
+        && ex is OperationCanceledException or ObjectDisposedException;
 
     /// <inheritdoc/>
     public async ValueTask DisposeAsync()
@@ -412,6 +492,28 @@ public sealed class RemoteClientListener : IAsyncDisposable
 
         _cts.Cancel();
         await StopAsync().ConfigureAwait(false);
+
+        // Wait for in-flight handshakes before disposing _cts and letting the caller dispose
+        // the certificate store. They read _cts.Token and use the CA and server certificates;
+        // pulling those out from under them turns an orderly shutdown into a burst of spurious
+        // errors, and (for the certificates) a use-after-dispose inside TLS.
+        Task[] pending;
+        lock (_inFlightGate)
+            pending = _inFlight.ToArray();
+
+        if (pending.Length > 0)
+        {
+            try
+            {
+                await Task.WhenAll(pending).WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Best effort: a handshake wedged on a peer that stopped responding must not
+                // hold up hub shutdown indefinitely.
+            }
+        }
+
         _cts.Dispose();
     }
 }
