@@ -370,7 +370,15 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
             }
             else
             {
-                hubId = ReserveSuffix(identity, preferred: NextFreeSuffix(identity));
+                // Claim exactly the slot NextFreeSuffix picked. It already skipped every LIVE
+                // client while holding this lock, so the slot is genuinely free — whereas
+                // ReserveSuffix would additionally skip slots held by DISCONNECTED clients,
+                // which defeats the reservation's entire purpose.
+                //
+                // That is a real, pre-existing bug: the constructor seeds slot 1 for every app
+                // in the persisted store, so the first time a known app connected after a hub
+                // restart it was handed '#2' and its '#1' sat in the list as a permanent ghost.
+                hubId = ClaimSuffix(identity, NextFreeSuffix(identity));
             }
 
             var existingReadOnly =
@@ -996,6 +1004,29 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     // Reserves (or returns the existing reservation for) a hub-id for an app with the
     // given preferred suffix. Slots persist for the broker's lifetime so a disconnected
     // client's id is re-taken by its restart instead of drifting.
+    /// <summary>
+    /// Records <paramref name="n"/> as taken for <paramref name="identity"/> and returns the
+    /// hub id, without searching for a different free number.
+    /// </summary>
+    /// <remarks>
+    /// For the registration path, where the caller has already established that no <i>live</i>
+    /// client holds the slot. A reservation left behind by a disconnected client is exactly
+    /// what a reconnecting app is supposed to reclaim.
+    /// </remarks>
+    private string ClaimSuffix(string identity, int n)
+    {
+        lock (_gate)
+        {
+            if (!_reservedSuffixes.TryGetValue(identity, out var set))
+            {
+                set = new SortedSet<int>();
+                _reservedSuffixes[identity] = set;
+            }
+            set.Add(n);
+            return FormatId(identity, n);
+        }
+    }
+
     private string ReserveSuffix(string appId, int preferred)
     {
         lock (_gate)
