@@ -1,5 +1,6 @@
 using Avalonia;
 using Keincheck.Avalonia;
+using Keincheck.Remote;
 
 namespace Keincheck.Demo;
 
@@ -21,5 +22,16 @@ internal static class Program
             // over the named pipe, register as "demo", and serve Core tool invocations
             // on the UI thread. Start the hub (or the keincheck-connect shim) to drive
             // this app end to end.
-            .UseMcpClient(o => o.AppId = "demo");
+            .UseMcpClient(o =>
+            {
+                o.AppId = "demo";
+                o.Log = message => Console.Error.WriteLine($"[keincheck] {message}");
+
+                // Optionally attach to a hub on ANOTHER machine. FromEnvironment reads
+                // KEINCHECK_REMOTE_FILE / KEINCHECK_REMOTE and returns null when neither is
+                // set, so the same build still uses the local pipe on a developer's desk --
+                // which is what makes this safe to leave in a sample. An app that never
+                // references Keincheck.Remote cannot be reached remotely at all.
+                o.Connector = RemoteChannelConnector.FromEnvironment();
+            });
 }

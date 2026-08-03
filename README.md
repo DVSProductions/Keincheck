@@ -186,25 +186,49 @@ the others. A build can do it automatically:
 </PropertyGroup>
 ```
 
-**3. Point the app at the hub.** Install `Keincheck.Remote` and set the connector:
+**3. Point the app at the hub.** Install `Keincheck.Remote` and set the connector — see
+[`samples/Keincheck.Demo/Program.cs`](samples/Keincheck.Demo/Program.cs) for the real thing:
 
 ```csharp
 builder.UseMcpClient(o =>
 {
     o.AppId = "protoface";
-    o.Connector = RemoteChannelConnector.FromEnvironment();   // KEINCHECK_REMOTE[_FILE]
+    o.Log = msg => Console.Error.WriteLine($"[keincheck] {msg}");
+
+    // Returns null when neither KEINCHECK_REMOTE_FILE nor KEINCHECK_REMOTE is set, so the
+    // same build still uses the local pipe on a developer's desk.
+    o.Connector = RemoteChannelConnector.FromEnvironment();
 });
 ```
 
-Over a tunnel — the suit has no inbound route, so forward a port and let the client dial:
+Set `KEINCHECK_REMOTE` (the bundle) or `KEINCHECK_REMOTE_FILE` (a path to it) on the target
+machine. Setting `o.Log` is worth doing: without it a failed attach reports only to
+`Debug.WriteLine`, which a Release build compiles out.
+
+**4. Give the client a route to the hub.** Either bind the hub to a reachable address:
+
+```
+hub_remote_enable { "bindAddress": "192.168.1.50", "port": 7423 }
+```
+
+...which needs an inbound firewall rule on the hub machine:
+
+```powershell
+New-NetFirewallRule -DisplayName "Keincheck Hub" -Direction Inbound `
+    -Protocol TCP -LocalPort 7423 -Action Allow    # run elevated
+```
+
+...or, if the target has no inbound route (behind NAT, roaming), forward a port instead and
+skip the firewall entirely. The client always dials, so a reverse forward works:
 
 ```sh
-ssh -R 7423:127.0.0.1:7423 OP3R4T0RV2      # from the dev box
+ssh -R 7423:127.0.0.1:7423 OP3R4T0RV2      # from the hub machine
 ```
 
 The client then appears as `protoface@OP3R4T0RV2#1` in `hub_list_clients` and is driven with
 exactly the same tools as a local app. **No new AI-facing tools for driving** — only
-`hub_remote_status` / `enable` / `disable` / `issue` / `revoke` for administering the listener.
+`hub_remote_status` / `enable` / `disable` / `issue` / `revoke` to administer the listener, and
+`hub_set_readonly` to permit mutating tools (remote clients start read-only).
 
 ### What protects it
 
@@ -214,8 +238,9 @@ exactly the same tools as a local app. **No new AI-facing tools for driving** �
 - **Identity from the credential.** A client's host label is the common name of the
   certificate the hub validated — not self-reported, and not read off the socket (which is
   always loopback through a tunnel anyway).
-- **Read-only by default.** Remote clients start read-only, and lifting it is session-scoped —
-  it returns on reconnect. Looking at the suit is always safe; driving it is a deliberate act.
+- **Read-only by default.** Remote clients start read-only; `hub_set_readonly` (or the tray)
+  permits mutating tools. The decision is remembered per machine, keyed on `AppId@Host`, so
+  allowing the suit cannot quietly allow a copy of the same app on your desk.
 - **Never auto-selected.** Tool calls go to whichever client is active, so a remote client is
   never made active automatically — that would let whatever attached first receive your calls.
 - **Cannot be launched.** The hub refuses to launch or restart a remote client rather than

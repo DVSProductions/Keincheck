@@ -24,13 +24,22 @@
     <KeincheckRemoteEnroll Condition="'$(KeincheckRemoteEnroll)' == ''">false</KeincheckRemoteEnroll>
     <KeincheckRemoteTarget Condition="'$(KeincheckRemoteTarget)' == ''">$(COMPUTERNAME)</KeincheckRemoteTarget>
     <KeincheckRemoteRenewWithinDays Condition="'$(KeincheckRemoteRenewWithinDays)' == ''">14</KeincheckRemoteRenewWithinDays>
-    <KeincheckRemoteCredentialPath Condition="'$(KeincheckRemoteCredentialPath)' == ''">$(IntermediateOutputPath)keincheck-remote.credential</KeincheckRemoteCredentialPath>
     <KeincheckEnrollExe Condition="'$(KeincheckEnrollExe)' == ''">$(MSBuildThisFileDirectory)..\tools\keincheck-enroll.exe</KeincheckEnrollExe>
   </PropertyGroup>
 
   <Target Name="KeincheckRemoteEnroll"
-          BeforeTargets="PrepareForBuild"
+          BeforeTargets="BeforeCompile"
           Condition="'$(KeincheckRemoteEnroll)' == 'true'">
+
+    <!--
+      Resolved INSIDE the target, and made absolute. $(IntermediateOutputPath) is not yet set
+      when this file is evaluated, so defaulting it above produced a bare relative filename and
+      the credential was written into the PROJECT ROOT: a secret, in the source tree, ready to
+      be committed. That is the exact outcome this feature promises to avoid.
+    -->
+    <PropertyGroup>
+      <KeincheckRemoteCredentialPath Condition="'$(KeincheckRemoteCredentialPath)' == ''">$([System.IO.Path]::GetFullPath('$(ProjectDir)$(IntermediateOutputPath)keincheck-remote.credential'))</KeincheckRemoteCredentialPath>
+    </PropertyGroup>
 
     <Error Condition="!Exists('$(KeincheckEnrollExe)')"
            Text="KeincheckRemoteEnroll is on but keincheck-enroll was not found at '$(KeincheckEnrollExe)'. Set KeincheckEnrollExe to its path." />
@@ -39,10 +48,12 @@
 
     <!--
       IgnoreExitCode: the tool distinguishes "no hub" (4) from "refused" (3), and neither
-      should stop a build that may not need a credential at all on this machine.
+      should stop a build that may not need a credential at all on this machine. Note there is
+      deliberately NO ContinueOnError here: it makes MSBuild swallow the task's outputs, so
+      ExitCode came back empty and the diagnostics below never fired, meaning a build with no
+      hub running reported complete success and silently produced no credential.
     -->
     <Exec Command="&quot;$(KeincheckEnrollExe)&quot; --target &quot;$(KeincheckRemoteTarget)&quot; --out &quot;$(KeincheckRemoteCredentialPath)&quot; --if-missing --renew-within $(KeincheckRemoteRenewWithinDays) --note &quot;build: $(MSBuildProjectName)&quot;"
-          ContinueOnError="true"
           IgnoreExitCode="true"
           StandardOutputImportance="low"
           StandardErrorImportance="normal">

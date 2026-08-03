@@ -628,7 +628,10 @@ something you can do for them from here:
    ```
 
    `FromEnvironment()` returns null when no credential is configured, so the same build still
-   attaches over the local pipe on a developer's machine.
+   attaches over the local pipe on a developer's machine. Setting `o.Log` is worth suggesting
+   too: without it a failed attach reports only to `Debug.WriteLine`, which a Release build
+   compiles out, so the app just never appears and says nothing.
+   `samples/Keincheck.Demo/Program.cs` in the repo is a working example.
 
 3. **Give it a credential.** On the hub side: `hub_remote_enable`, then
    `hub_remote_issue { "target": "OP3R4T0RV2" }`. Hand the returned bundle to that machine as
@@ -636,8 +639,14 @@ something you can do for them from here:
    `KEINCHECK_REMOTE_FILE`). The label you pass as `target` becomes the `@host` in the
    client's id, so pick the machine's real name.
 
-If the app has no inbound route (behind NAT, roaming), forward a port instead of exposing one —
-the client always dials, so from the hub's machine: `ssh -R 7423:127.0.0.1:7423 OP3R4T0RV2`.
+A build can also enroll itself: the `Keincheck.Remote` package ships an MSBuild target that
+asks the local hub for a credential and embeds it, enabled with
+`<KeincheckRemoteEnroll>true</KeincheckRemoteEnroll>`.
+
+Finally the client needs a route to the hub. Either bind it somewhere reachable
+(`hub_remote_enable { "bindAddress": "192.168.1.50" }`, which needs an inbound firewall rule on
+the hub machine), or forward a port and skip the firewall — the client always dials, so from
+the hub's machine: `ssh -R 7423:127.0.0.1:7423 OP3R4T0RV2`.
 
 ### What is different about a remote client
 

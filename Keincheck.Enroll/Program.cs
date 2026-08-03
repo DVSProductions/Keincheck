@@ -71,7 +71,11 @@ internal static class Program
         {
             response = await RequestAsync(options).ConfigureAwait(false);
         }
-        catch (TimeoutException)
+        // Both shapes mean the same thing to a user: nothing is listening on the control pipe.
+        // The connect helper surfaces the deadline as a TimeoutException on one path and as a
+        // cancelled task on another, and reporting the latter verbatim produced
+        // "could not reach the hub — A task was canceled", which explains nothing.
+        catch (Exception ex) when (ex is TimeoutException or OperationCanceledException)
         {
             // A developer's hub not being open must not break their build. The caller decides
             // whether that is fatal; the .targets file treats it as a warning.
