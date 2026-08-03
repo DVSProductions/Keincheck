@@ -127,19 +127,46 @@ public sealed class ClientToolHost : IDisposable
     };
 
     /// <summary>
-    /// Classifies a built tool as read-only. The MCP <see cref="ToolAnnotations.ReadOnlyHint"/>
-    /// wins when the author set it; otherwise the tool is read-only iff it is not one
-    /// of the <see cref="KnownMutatingTools"/>. The Core tools carry no annotations
-    /// today, so the explicit set is the operative rule — but a future annotated tool
-    /// is honoured without touching this code.
+    /// The Core tools that are known to be side-effect-free. Kept as an explicit allow-list
+    /// alongside <see cref="KnownMutatingTools"/> so that a tool in <i>neither</i> list is
+    /// treated as mutating rather than assumed safe.
     /// </summary>
+    private static readonly HashSet<string> KnownReadOnlyTools = new(StringComparer.Ordinal)
+    {
+        "list_windows", "query_controls", "hit_test", "wait_for", "wait_for_idle",
+        "describe_screen", "keincheck_guide",
+    };
+
+    /// <summary>
+    /// Classifies a built tool as read-only. An explicit MCP
+    /// <see cref="ToolAnnotations.ReadOnlyHint"/> always wins; otherwise the tool must be
+    /// recognisably read-only (a <c>get_</c>/<c>screenshot_</c> reader, or one of
+    /// <see cref="KnownReadOnlyTools"/>) to qualify.
+    /// </summary>
+    /// <remarks>
+    /// <b>Fail closed.</b> This previously returned "read-only" for anything not in
+    /// <see cref="KnownMutatingTools"/>, which was tolerable while the classification was only
+    /// used for this client's own local gate over a fixed Core tool set. It stopped being
+    /// tolerable once the result is <i>reported to the hub</i> (<see cref="Describe"/>) and the
+    /// hub trusts it: <see cref="Build"/> accepts <c>additionalToolAssemblies</c>, so an app's
+    /// own unannotated mutating tool would have been declared read-only and run against a
+    /// read-only client — including a remote one, where read-only is the default rather than
+    /// an unusual setting. An unrecognised name is now mutating, and an app that wants
+    /// otherwise says so with a <c>ReadOnlyHint</c>.
+    /// </remarks>
     private static bool IsReadOnly(McpServerTool tool)
     {
         var hint = tool.ProtocolTool.Annotations?.ReadOnlyHint;
         if (hint is not null)
             return hint.Value;
 
-        return !KnownMutatingTools.Contains(tool.ProtocolTool.Name);
+        var name = tool.ProtocolTool.Name;
+        if (KnownMutatingTools.Contains(name))
+            return false;
+
+        return name.StartsWith("get_", StringComparison.Ordinal)
+            || name.StartsWith("screenshot", StringComparison.OrdinalIgnoreCase)
+            || KnownReadOnlyTools.Contains(name);
     }
 
     /// <summary>
@@ -147,6 +174,13 @@ public sealed class ClientToolHost : IDisposable
     /// client sends in a <see cref="ToolListMessage"/>. The input schema is copied
     /// straight from <see cref="McpServerTool.ProtocolTool"/> (<see cref="Tool.InputSchema"/>).
     /// </summary>
+    /// <remarks>
+    /// Each descriptor also carries <see cref="ToolDescriptor.ReadOnly"/>, the same
+    /// classification this host uses for its own local gate. The client is the right
+    /// authority: it owns the tool implementations, whereas the hub could previously only
+    /// guess from names — and guessed wrong for <c>describe_screen</c>, <c>wait_for_idle</c>
+    /// and others. That matters now that remote clients are read-only by default.
+    /// </remarks>
     public IReadOnlyList<ToolDescriptor> Describe()
     {
         var list = new List<ToolDescriptor>(_tools.Count);
@@ -159,6 +193,7 @@ public sealed class ClientToolHost : IDisposable
                 Description = pt.Description,
                 // Tool.InputSchema is a JsonElement; clone so it survives the source's lifetime.
                 InputSchema = pt.InputSchema.Clone(),
+                ReadOnly = _readOnlyTools.Contains(pt.Name),
             });
         }
 
