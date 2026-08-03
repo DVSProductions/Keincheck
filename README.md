@@ -1,6 +1,6 @@
 # Keincheck
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/DVSProductions/Keincheck/blob/main/LICENSE)
 [![Release](https://img.shields.io/github/v/release/DVSProductions/Keincheck?include_prereleases&sort=semver)](https://github.com/DVSProductions/Keincheck/releases)
 ![.NET](https://img.shields.io/badge/.NET-8.0%20%7C%2010.0-512BD4)
 ![Avalonia](https://img.shields.io/badge/Avalonia-12-7B3FE4)
@@ -14,6 +14,22 @@ capture screenshots, and read binding errors.
 **Supported UI frameworks:** Avalonia 12 today; WPF in progress. The introspection engine
 is framework-free and reaches the UI through a single neutral seam (`IUiAdapter`), so new
 toolkits plug in as adapter packages without touching the engine.
+
+> ### ✨ New — drive apps on *other machines*
+>
+> Until now the hub could only see apps on its own box. **[`Keincheck.Remote`](#remote) lets it
+> broker apps running anywhere**: inspect and drive an Avalonia app on a headless device, a
+> test rig, or a laptop across the room — from the same AI session, through *exactly the same
+> tools*. A remote client is just a client that happens to have a host:
+>
+> ```
+> protoface#1                 ← local
+> protoface@OP3R4T0RV2#1      ← the machine on the bench
+> ```
+>
+> Mutually-authenticated TLS with a hub-owned certificate authority, read-only until you say
+> otherwise, and **opt-in by package** — an app that does not reference `Keincheck.Remote`
+> links no networking code at all. [Set it up →](#remote)
 
 Two deployment models share one introspection engine:
 
@@ -89,74 +105,24 @@ client's tools and forwards calls over the pipe.
 `screenshot_window`, `screenshot_control`, `set_property`, `automation_action`, `set_focus`,
 `wait_for`, `pointer` / `click_at`, `scroll_at`, `type_text`, `send_keys`.
 
-**Hub meta-tools:** `hub_list_clients`, `hub_list_known_clients`, `hub_launch_client`,
-`hub_restart_client`, `hub_select_client`, `hub_client_status`.
+**Hub meta-tools** — always present, whichever app is active. Start with `hub_guide`, which
+returns the whole workflow as a document the model can read before touching anything.
+
+| | |
+|---|---|
+| *Discover & select* | `hub_guide`, `hub_list_clients`, `hub_list_known_clients`, `hub_client_status`, `hub_select_client`, `hub_wait_for_client`, `hub_status` |
+| *Lifecycle* | `hub_launch_client`, `hub_restart_client` |
+| *Permissions* | `hub_set_readonly` — allow or refuse mutating tools per client |
+| *Record & replay* | `hub_record_start`, `hub_record_stop`, `hub_record_status`, `hub_replay`, `hub_export_test` |
+| *[Remote](#remote)* | `hub_remote_status`, `hub_remote_enable`, `hub_remote_disable`, `hub_remote_issue`, `hub_remote_revoke` |
+
+Remote adds **no new tools for driving** — a remote app is addressed and driven exactly like a
+local one. The `hub_remote_*` tools only administer the listener and its credentials.
 
 **Addressing:** stable per-session handles (`ctl-1a`) plus a CSS-ish selector engine
 (`Button[Name=Save]`, `#Save`, `.toolGroup`, `Button.primary`, `StackPanel > TextBox`).
 The `.class` selector matches author style-class membership (Avalonia `Classes="…"`);
 frameworks without style classes match nothing.
-
-## Projects
-
-| Project | TFM | Role |
-|---|---|---|
-| `Keincheck.Protocol` | net8.0 | Zero-dependency wire: named-pipe transport, chunked framing, message DTOs |
-| `Keincheck.Core` | net8.0 | **Framework-free** introspection engine: registry, selectors, serializer, the 22 tools, and the neutral `IUiAdapter` / `IUiDispatcher` seam (no UI-toolkit reference) |
-| `Keincheck.Avalonia` | net8.0 | Avalonia 12 adapter: `AvaloniaUiAdapter` + `AvaloniaUiDispatcher` behind the seam, plus the Avalonia `UseMcpClient` |
-| `Keincheck.Wpf` | net8.0-windows | WPF adapter — **in progress** (scaffolded `WpfUiAdapter`, real `WpfUiDispatcher`, `UseKeincheckClient`) |
-| `Keincheck.Client` | net8.0 | **Framework-free** broker client (`BrokerClientHost.Start`) — named-pipe, **no ASP.NET** |
-| `Keincheck.Hub` | net10.0 | The broker daemon: pipe server, registry, launcher/restart, MCP proxy, tray (Velopack) |
-| `Keincheck.Connect` | net8.0 | The stdio shim an MCP client spawns |
-| `Keincheck.Remote` | net8.0 | **Opt-in** mutual-TLS transport for attaching apps on *other machines* — see [Remote](#remote) |
-| `Keincheck` | net8.0 | Embedded all-in-one server (`UseMcpServer`) — Core + the Avalonia adapter |
-| `samples/Keincheck.Demo` | net10.0 | Demo Avalonia app wired as a client |
-| `tests/*` | net8.0 / net10.0 | xUnit + Avalonia.Headless |
-
-The engine is **framework-free**: `Keincheck.Core` knows nothing about any UI toolkit and
-talks to the live UI only through the neutral `IUiAdapter` / `IUiDispatcher` seam. A new
-framework plugs in by implementing that seam in its own adapter package (as
-`Keincheck.Avalonia` does for Avalonia and `Keincheck.Wpf` is doing for WPF) — no engine
-changes required.
-
-Libraries target **net8.0** for broad compatibility; the desktop/test apps target
-**net10.0** with `<RollForward>Major</RollForward>`. Design notes live in [`docs/`](docs/).
-
-## Build & test
-
-```sh
-dotnet build Keincheck.sln
-dotnet test  Keincheck.sln
-```
-
-Every push and pull request runs that build and the full unit suite
-([`ci.yml`](.github/workflows/ci.yml)), plus an end-to-end job
-([`e2e.yml`](.github/workflows/e2e.yml)) that installs the hub from a real Velopack
-installer, launches the demo apps, and drives them through `keincheck-connect.exe` — the
-same path Claude takes. See [`docs/ci.md`](docs/ci.md) for what it covers and how to run it
-locally.
-
-The E2E suite lives in `tests/Keincheck.E2E` and is **opt-in**: it drives a real hub and
-rewrites `%APPDATA%\Keincheck`, so it skips unless `KEINCHECK_E2E=1`, and refuses to start
-if a hub is already running rather than hijacking yours.
-
-## Releasing
-
-Pushing a semver tag triggers the [release workflow](.github/workflows/release.yml), which
-publishes the Hub as a Velopack release on GitHub (installer + update + delta packages):
-
-```sh
-git tag v0.2.0
-git push origin v0.2.0
-```
-
-Locally, the same flow is:
-
-```sh
-dotnet publish Keincheck.Hub/Keincheck.Hub.csproj -c Release -r win-x64 --self-contained true -o publish
-vpk pack -u Keincheck.Hub -v 0.2.0 -p publish -e Keincheck.Hub.exe --packTitle "Keincheck Hub"
-vpk upload github --repoUrl https://github.com/DVSProductions/Keincheck --publish --releaseName "Keincheck Hub 0.2.0" --tag v0.2.0 --token <gh-token>
-```
 
 ## Remote
 
@@ -223,7 +189,7 @@ a hard error rather than a silent fallback.
 Never commit a credential. Build-issued ones default to 90 days, hand-issued to 365.
 
 **3. Point the app at the hub.** Install `Keincheck.Remote` and set the connector — see
-[`samples/Keincheck.Demo/Program.cs`](samples/Keincheck.Demo/Program.cs) for the real thing:
+[`samples/Keincheck.Demo/Program.cs`](https://github.com/DVSProductions/Keincheck/blob/main/samples/Keincheck.Demo/Program.cs) for the real thing:
 
 ```csharp
 builder.UseMcpClient(o =>
@@ -289,6 +255,82 @@ exactly the same tools as a local app. **No new AI-facing tools for driving** �
 Binding a non-loopback address is allowed — mutual TLS, not the network boundary, is what
 protects the hub — but it is always an explicit choice, and you will need a firewall rule.
 
+### When it does not connect
+
+| Symptom | Cause |
+|---|---|
+| The app never appears in `hub_list_clients`, and says nothing | No credential. `RemoteChannelConnector.FromEnvironment()` returned null, so it silently used the local pipe instead. Set `KEINCHECK_REMOTE_FILE`, and set `o.Log` so the client can tell you. |
+| *"the remote credential … expired"* | Re-issue with `hub_remote_issue`. The client stops rather than retrying, on purpose — a doomed reconnect loop would handshake every few seconds forever. |
+| *"The hub refused the session (revoked)"* | That credential was revoked, or was issued by a different hub. Issue a fresh one. |
+| *"No Keincheck hub reachable at …"* | Nothing is listening at that address. Check `hub_remote_status` for `boundEndpoint`, and remember `hub_remote_enable` only takes effect on a new port after the listener rebinds. |
+| Connects, then drops every ~20s | The client is not sending heartbeats. If you wrote your own client rather than using `UseMcpClient`, the hub's watchdog will evict it. |
+| `click_at` is *"refused"* | Working as intended — remote starts read-only. `hub_set_readonly { clientId, readOnly: false }`. |
+| `hub_restart_client` fails on a remote client | Also intended. The hub cannot start a process on another machine; it refuses rather than risk starting a local copy. Use `hub_wait_for_client` — remote clients reconnect on their own. |
+
+The hub's audit trail (`%APPDATA%\Keincheck\audit\*.jsonl`, and the tray window) records every
+attach, detach and authentication failure with its reason.
+
+## Projects
+
+| Project | TFM | Role |
+|---|---|---|
+| `Keincheck.Protocol` | net8.0 | Zero-dependency wire: named-pipe transport, chunked framing, message DTOs |
+| `Keincheck.Core` | net8.0 | **Framework-free** introspection engine: registry, selectors, serializer, the 22 tools, and the neutral `IUiAdapter` / `IUiDispatcher` seam (no UI-toolkit reference) |
+| `Keincheck.Avalonia` | net8.0 | Avalonia 12 adapter: `AvaloniaUiAdapter` + `AvaloniaUiDispatcher` behind the seam, plus the Avalonia `UseMcpClient` |
+| `Keincheck.Wpf` | net8.0-windows | WPF adapter — **in progress** (scaffolded `WpfUiAdapter`, real `WpfUiDispatcher`, `UseKeincheckClient`) |
+| `Keincheck.Client` | net8.0 | **Framework-free** broker client (`BrokerClientHost.Start`) — named-pipe, **no ASP.NET** |
+| `Keincheck.Hub` | net10.0 | The broker daemon: pipe server, registry, launcher/restart, MCP proxy, tray (Velopack) |
+| `Keincheck.Connect` | net8.0 | The stdio shim an MCP client spawns |
+| `Keincheck.Remote` | net8.0 | **Opt-in** mutual-TLS transport for attaching apps on *other machines* — see [Remote](#remote) |
+| `Keincheck` | net8.0 | Embedded all-in-one server (`UseMcpServer`) — Core + the Avalonia adapter |
+| `samples/Keincheck.Demo` | net10.0 | Demo Avalonia app wired as a client |
+| `tests/*` | net8.0 / net10.0 | xUnit + Avalonia.Headless |
+
+The engine is **framework-free**: `Keincheck.Core` knows nothing about any UI toolkit and
+talks to the live UI only through the neutral `IUiAdapter` / `IUiDispatcher` seam. A new
+framework plugs in by implementing that seam in its own adapter package (as
+`Keincheck.Avalonia` does for Avalonia and `Keincheck.Wpf` is doing for WPF) — no engine
+changes required.
+
+Libraries target **net8.0** for broad compatibility; the desktop/test apps target
+**net10.0** with `<RollForward>Major</RollForward>`. Design notes live in [`docs/`](https://github.com/DVSProductions/Keincheck/tree/main/docs).
+
+## Build & test
+
+```sh
+dotnet build Keincheck.sln
+dotnet test  Keincheck.sln
+```
+
+Every push and pull request runs that build and the full unit suite
+([`ci.yml`](https://github.com/DVSProductions/Keincheck/blob/main/.github/workflows/ci.yml)), plus an end-to-end job
+([`e2e.yml`](https://github.com/DVSProductions/Keincheck/blob/main/.github/workflows/e2e.yml)) that installs the hub from a real Velopack
+installer, launches the demo apps, and drives them through `keincheck-connect.exe` — the
+same path Claude takes. See [`docs/ci.md`](https://github.com/DVSProductions/Keincheck/blob/main/docs/ci.md) for what it covers and how to run it
+locally.
+
+The E2E suite lives in `tests/Keincheck.E2E` and is **opt-in**: it drives a real hub and
+rewrites `%APPDATA%\Keincheck`, so it skips unless `KEINCHECK_E2E=1`, and refuses to start
+if a hub is already running rather than hijacking yours.
+
+## Releasing
+
+Pushing a semver tag triggers the [release workflow](https://github.com/DVSProductions/Keincheck/blob/main/.github/workflows/release.yml), which
+publishes the Hub as a Velopack release on GitHub (installer + update + delta packages):
+
+```sh
+git tag v0.10.0
+git push origin v0.10.0
+```
+
+Locally, the same flow is:
+
+```sh
+dotnet publish Keincheck.Hub/Keincheck.Hub.csproj -c Release -r win-x64 --self-contained true -o publish
+vpk pack -u Keincheck.Hub -v 0.10.0 -p publish -e Keincheck.Hub.exe --packTitle "Keincheck Hub"
+vpk upload github --repoUrl https://github.com/DVSProductions/Keincheck --publish --releaseName "Keincheck Hub 0.10.0" --tag v0.10.0 --token <gh-token>
+```
+
 ## Security
 
 Keincheck grants full programmatic control of an app's UI. It is designed for
@@ -303,11 +345,11 @@ Keincheck grants full programmatic control of an app's UI. It is designed for
 - **Remote:** off unless enabled, then mutually-authenticated TLS — see [Remote](#remote).
   Note the boundary this does *not* move: anything already running as your user can read the
   hub's CA from `%APPDATA%` and mint credentials, exactly as it can already drive every
-  registered app through the control pipe. Every local issuance path (MCP tool, tray window,
-  `keincheck-enroll`) sits at that same boundary and is treated identically. The line that
-  *is* drawn is by transport: a **remote** client can never mint further credentials, so one
-  leaked build certificate cannot become a self-renewing grant.
+  registered app through the control pipe. Every local issuance path (the MCP tool, the tray
+  window, `Keincheck.Hub.exe --issue-credential`) sits at that same boundary and is treated
+  identically. The line that *is* drawn is by transport: a **remote** client can never mint
+  further credentials, so one leaked build certificate cannot become a self-renewing grant.
 
 ## License
 
-[MIT](LICENSE) © 2026 Valentino Saitz
+[MIT](https://github.com/DVSProductions/Keincheck/blob/main/LICENSE) © 2026 Valentino Saitz

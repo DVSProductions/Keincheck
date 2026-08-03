@@ -21,16 +21,22 @@
 > Still descoped, as agreed: the rendezvous relay (§4B), UDP beacon discovery (§7), and the
 > region/diff screenshot codec (§7) — though the network path did get Brotli frame compression.
 >
-> **Verified, and where.** Cross-machine against `OP3R4T0RV2` over `ssh -R`: attach, drive,
-> read-only refusal, revocation, and three kill/reconnect cycles keeping the same id. The real
-> `UseMcpClient` + `RemoteChannelConnector` client stack (not a hand-rolled harness) attaching
-> with all 27 Core tools, returning a 28 KB base64 PNG screenshot and clicking a real control.
-> A non-loopback LAN bind. The build-step enrollment, including its no-hub path.
+> **Verified.** Unit and integration coverage runs on every push (`ci.yml`). An opt-in
+> end-to-end suite (`e2e.yml`) installs the hub from a real Velopack installer and drives the
+> remote leg through the shipped binary: enable, issue, attach a demo via the real
+> `UseMcpClient` + `RemoteChannelConnector.FromEnvironment()` stack over a real TCP socket,
+> prove the guards hold, then revoke and disable. It also packs `Keincheck.Remote` and restores
+> it into a consumer project, asserting the MSBuild targets travelled inside the package.
 >
-> **Not verified:** a remote client reached across a real LAN *through* a firewall — the bind
-> and accept path is proven, but the inbound rule needs elevation and was never added, so every
-> cross-machine run went through an SSH forward. Also unproven: the NuGet packages actually
-> restoring in a consuming project, and the tray Remote panel, which is written but never opened.
+> Manually, cross-machine against `OP3R4T0RV2` over `ssh -R`: attach, drive, read-only refusal,
+> revocation, three kill/reconnect cycles keeping the same id, a 28 KB base64 PNG screenshot,
+> clicking a real control, and a non-loopback LAN bind.
+>
+> **Still not verified:** a remote client reached across a real LAN *through* a firewall — the
+> bind and accept path is proven, but adding the inbound rule needs elevation, so every
+> cross-machine run went through an SSH forward. Nothing has run on Linux or macOS, where
+> OpenSSL replaces SChannel and the certificate storage flags this design depends on behave
+> differently. The tray Remote panel is written but has never been opened.
 
 ## 1. The problem
 

@@ -8,7 +8,6 @@
     <!-- NuGet package metadata -->
     <PackageId>Keincheck.Remote</PackageId>
     <IsPackable>true</IsPackable>
-    <Version>0.9.0</Version>
     <Authors>Keincheck</Authors>
     <Description>Opt-in remote transport for Keincheck: mutually-authenticated TLS between a Keincheck client and a hub on another machine. Install this package ONLY in apps you want to be remotely debuggable — an app that does not reference it links no networking code at all.</Description>
     <PackageTags>avalonia;mcp;remote;tls;mtls;debugging</PackageTags>
