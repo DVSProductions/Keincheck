@@ -129,6 +129,17 @@ dotnet build Keincheck.sln
 dotnet test  Keincheck.sln
 ```
 
+Every push and pull request runs that build and the full unit suite
+([`ci.yml`](.github/workflows/ci.yml)), plus an end-to-end job
+([`e2e.yml`](.github/workflows/e2e.yml)) that installs the hub from a real Velopack
+installer, launches the demo apps, and drives them through `keincheck-connect.exe` — the
+same path Claude takes. See [`docs/ci.md`](docs/ci.md) for what it covers and how to run it
+locally.
+
+The E2E suite lives in `tests/Keincheck.E2E` and is **opt-in**: it drives a real hub and
+rewrites `%APPDATA%\Keincheck`, so it skips unless `KEINCHECK_E2E=1`, and refuses to start
+if a hub is already running rather than hijacking yours.
+
 ## Releasing
 
 Pushing a semver tag triggers the [release workflow](.github/workflows/release.yml), which

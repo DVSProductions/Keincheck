@@ -1,0 +1,46 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    A throwaway app that consumes Keincheck the way a real user does: from NuGet
+    packages, not project references.
+
+    Deliberately NOT in Keincheck.sln, and the CI job copies it OUT of the repository
+    before building. Inside the tree the root Directory.Build.props would apply
+    (IsPackable, PackageReadmeFile, the README/icon None items), and the fixture would
+    quietly stop representing what a consumer actually gets.
+
+    KeincheckVersion is passed on the command line and pinned exactly, so the restore
+    cannot silently fall back to a published package from nuget.org and report success
+    for something the local pack never produced.
+  -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <!-- The packages target net8.0; this app targets net10.0. -->
+    <RollForward>Major</RollForward>
+    <AssemblyName>ConsumerApp</AssemblyName>
+    <RootNamespace>ConsumerApp</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.0.4" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.0.4" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The package under test. Pulls Keincheck.Client + Core + Protocol transitively —
+         if any of those pack wrong, this restore is where it surfaces. -->
+    <PackageReference Include="Keincheck.Avalonia" Version="$(KeincheckVersion)" />
+    <!-- Included so the package's own build\Keincheck.Remote.targets gets imported into a
+         real consumer build. That targets file is inert unless opted into, which is
+         exactly the property the job asserts. -->
+    <PackageReference Include="Keincheck.Remote" Version="$(KeincheckVersion)" />
+  </ItemGroup>
+
+</Project>

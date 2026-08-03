@@ -1,0 +1,14 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="ConsumerApp.MainWindow"
+        Width="420" Height="220"
+        Title="Keincheck Consumer">
+
+  <!-- Just enough surface for the CI job to select a control and observe a side effect. -->
+  <StackPanel Name="Root" Margin="16" Spacing="12">
+    <TextBlock Name="Heading" Text="Consumer app" FontSize="18" />
+    <Button Name="ConsumerButton" Content="Press" Click="OnPress" />
+    <TextBlock Name="ConsumerLabel" Text="Presses: 0" />
+  </StackPanel>
+
+</Window>

@@ -1,0 +1,56 @@
+name: CI
+
+# Build and test on every push and pull request.
+#
+# Until this existed the repo had ~330 xUnit tests across four projects and CI ran
+# none of them: release.yml and publish-nuget.yml both fire only on v*.*.* tags and
+# neither ever invokes dotnet build or dotnet test. A tag could ship a solution that
+# had not compiled since the last time someone built it locally.
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: windows-latest   # Keincheck.Wpf is net8.0-windows + UseWPF, so the solution is Windows-only
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Restore
+        run: dotnet restore Keincheck.sln
+
+      # Builds every project including both demo samples, so "the samples still compile"
+      # is covered here rather than needing its own job.
+      - name: Build
+        run: dotnet build Keincheck.sln -c Release --no-restore
+
+      # Category!=E2E excludes tests/Keincheck.E2E, which drives a real installed hub
+      # process and belongs to e2e.yml. Those tests also self-skip without KEINCHECK_E2E,
+      # so this filter is the fast path rather than the only guard.
+      - name: Test
+        run: >
+          dotnet test Keincheck.sln -c Release --no-build
+          --filter "Category!=E2E"
+          --logger "trx;LogFileName=results.trx"
+          --results-directory ${{ runner.temp }}/test-results
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: ${{ runner.temp }}/test-results
+          if-no-files-found: warn

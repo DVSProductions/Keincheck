@@ -1,0 +1,208 @@
+name: E2E spike (throwaway)
+
+# THROWAWAY. Delete this file once it has gone green once.
+#
+# It answers exactly one blocking question before any E2E harness gets built:
+# does a real, Velopack-installed Keincheck.Hub.exe survive startup on a
+# GitHub-hosted windows runner?
+#
+# The concern is Session 0. GitHub-hosted Windows runners execute the job in a
+# non-interactive session with a 1024x768 virtual display and no explorer.exe.
+# The hub is an Avalonia WinExe whose Main ends in StartWithClassicDesktopLifetime
+# and whose App builds a TrayIcon (Shell_NotifyIcon, which wants a taskbar that is
+# not there). If Avalonia cannot initialise, the hub process dies and every
+# scenario in the E2E plan is unbuildable as designed.
+#
+# Note that HubRuntime.Start runs BEFORE Avalonia, so the pipe endpoint can come up
+# for a moment even on a hub that is about to die. That is why the last step
+# re-checks liveness after the MCP round-trip instead of trusting the round-trip.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  spike:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Install vpk
+        run: dotnet tool install -g vpk --version 1.2.0
+
+      # Same publish recipe as release.yml. If the spike passes with a different
+      # recipe it has proven nothing about what actually ships.
+      - name: Publish hub + shim
+        run: |
+          dotnet publish Keincheck.Hub/Keincheck.Hub.csproj `
+            -c Release -r win-x64 --self-contained true -p:PublishReadyToRun=true -o publish
+          dotnet publish Keincheck.Connect/Keincheck.Connect.csproj -c Release -r win-x64 -o publish-shim
+          Copy-Item publish-shim/keincheck-connect.exe publish/ -Force
+
+      # 99.0.0 is deliberate: HubOptions.AutoUpdate is true and a Velopack-installed
+      # hub really does poll github.com/DVSProductions/Keincheck. Nothing published is
+      # newer than 99.0.0, so the updater finds nothing and cannot swap the binaries
+      # out from under the spike.
+      - name: Pack
+        run: |
+          vpk pack -u Keincheck.Hub -v 99.0.0 -p publish -e Keincheck.Hub.exe `
+            --icon assets/icon.ico --packTitle "Keincheck Hub" --packAuthors "Valentino Saitz"
+
+      - name: Install silently
+        run: |
+          $setup = "Releases\Keincheck.Hub-win-Setup.exe"
+          if (-not (Test-Path $setup)) { throw "vpk pack produced no installer at $setup" }
+          & $setup --silent --installto "$env:RUNNER_TEMP\kc-hub"
+          if ($LASTEXITCODE -ne 0) { throw "installer exited $LASTEXITCODE" }
+
+      - name: Assert the installed layout
+        run: |
+          $root = "$env:RUNNER_TEMP\kc-hub"
+          # <root>\Keincheck.Hub.exe is the Velopack STUB launcher — it re-execs the real
+          # binary and detaches, so a test that drove it would lose the process handle.
+          # The real hub, and the co-located shim, live in <root>\current.
+          $expect = @(
+            "$root\current\Keincheck.Hub.exe",
+            "$root\current\keincheck-connect.exe",
+            "$root\Update.exe"
+          )
+          $missing = $expect | Where-Object { -not (Test-Path $_) }
+          Get-ChildItem -Recurse $root | Select-Object -ExpandProperty FullName
+          if ($missing) { throw "missing from the install: $($missing -join ', ')" }
+          Write-Host "install layout OK"
+
+      - name: Start the hub and probe it over MCP
+        id: probe
+        run: |
+          $ErrorActionPreference = "Stop"
+          $logs = "$env:RUNNER_TEMP\kc-logs"
+          New-Item -ItemType Directory -Force $logs | Out-Null
+
+          # PipeNames derives every endpoint from a sanitised Environment.UserName:
+          # letters/digits/-/_ survive, everything else becomes '_'.
+          $scope = ($env:USERNAME.ToCharArray() | ForEach-Object {
+            if ([char]::IsLetterOrDigit($_) -or $_ -eq '-' -or $_ -eq '_') { $_ } else { '_' }
+          }) -join ''
+          if ([string]::IsNullOrEmpty($scope)) { $scope = "default" }
+          $mutexName = "Global\Keincheck.Hub.$scope"
+          $pipeName  = "Keincheck.mcp.$scope.default"
+          Write-Host "user scope '$scope' -> mutex '$mutexName', pipe '$pipeName'"
+
+          function Test-HubMutex {
+            $m = $null
+            if ([System.Threading.Mutex]::TryOpenExisting($mutexName, [ref] $m)) { $m.Dispose(); return $true }
+            return $false
+          }
+
+          # Setup.exe may have left a hub running. If one is up, the hub we start next
+          # loses the single-instance election and exits 0 immediately, and every check
+          # below would then be silently measuring the OTHER process. Clear the field
+          # first so the spike only ever judges a hub whose stderr it captured.
+          if (Test-HubMutex) {
+            Write-Host "a hub is already running (installer launched it?) — stopping it"
+            Get-Process Keincheck.Hub -ErrorAction SilentlyContinue | Stop-Process -Force
+            $clear = (Get-Date).AddSeconds(15)
+            while ((Get-Date) -lt $clear -and (Test-HubMutex)) { Start-Sleep -Milliseconds 200 }
+            if (Test-HubMutex) { throw "could not clear the existing hub off '$mutexName'" }
+          }
+
+          # HubMcpServer.StartHttp has no try/catch around the Kestrel bind, so a busy
+          # 3100 takes down Main before Avalonia even starts. Catching it here turns a
+          # baffling instant death into one sentence.
+          $busy = Get-NetTCPConnection -LocalPort 3100 -State Listen -ErrorAction SilentlyContinue
+          if ($busy) { throw "port 3100 is already listening — the hub's Kestrel bind would throw and kill it" }
+
+          $hub = Start-Process -FilePath "$env:RUNNER_TEMP\kc-hub\current\Keincheck.Hub.exe" `
+            -RedirectStandardOutput "$logs\hub.out.log" `
+            -RedirectStandardError  "$logs\hub.err.log" `
+            -PassThru
+          Write-Host "hub pid $($hub.Id)"
+
+          # Stage 1 of the readiness gate the shim itself uses: the hub holds its
+          # single-instance mutex for its lifetime, so its existence means "process up".
+          $deadline = (Get-Date).AddSeconds(30)
+          $up = $false
+          while ((Get-Date) -lt $deadline) {
+            # Watching for exit matters as much as watching for the mutex: a hub that dies
+            # during Avalonia init would otherwise just time out here after 30 silent seconds.
+            $hub.Refresh()
+            if ($hub.HasExited) {
+              Get-Content "$logs\hub.err.log" -Tail 40 -ErrorAction SilentlyContinue
+              throw "hub exited with code $($hub.ExitCode) before claiming its mutex"
+            }
+            if (Test-HubMutex) { $up = $true; break }
+            Start-Sleep -Milliseconds 200
+          }
+          if (-not $up) { throw "hub never claimed '$mutexName'" }
+          Write-Host "hub is up (mutex claimed)"
+
+          # Stage 2: the MCP pipe actually accepting is the real endpoint-reachable gate.
+          $pipe = New-Object System.IO.Pipes.NamedPipeClientStream(
+            '.', $pipeName, [System.IO.Pipes.PipeDirection]::InOut,
+            ([System.IO.Pipes.PipeOptions]::Asynchronous -bor [System.IO.Pipes.PipeOptions]::CurrentUserOnly))
+          $pipe.Connect(30000)
+          Write-Host "connected to '$pipeName'"
+
+          $writer = New-Object System.IO.StreamWriter($pipe)
+          $writer.AutoFlush = $true
+          $reader = New-Object System.IO.StreamReader($pipe)
+
+          # Newline-delimited JSON-RPC: exactly what the hub serves over this pipe and
+          # what keincheck-connect.exe byte-pumps between Claude and the hub.
+          $writer.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"spike","version":"1.0"}}}')
+          $init = $reader.ReadLine()
+          Write-Host "initialize -> $init"
+          if (-not $init) { throw "no initialize response" }
+
+          $writer.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
+          $writer.WriteLine('{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}')
+          $list = $reader.ReadLine()
+          if (-not $list) { throw "no tools/list response" }
+          $tools = ($list | ConvertFrom-Json).result.tools
+          Write-Host "tools/list -> $($tools.Count) tools: $(($tools.name | Sort-Object) -join ', ')"
+          if ($tools.name -notcontains 'hub_status') { throw "hub_status missing from tools/list" }
+
+          $writer.WriteLine('{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"hub_status","arguments":{}}}')
+          $status = $reader.ReadLine()
+          Write-Host "hub_status -> $status"
+          if (-not $status) { throw "no hub_status response" }
+
+          $reader.Dispose(); $writer.Dispose(); $pipe.Dispose()
+
+          # THE point of the spike. HubRuntime.Start runs before Avalonia, so a hub can
+          # answer everything above and still be a corpse a second later because the tray
+          # icon or the desktop session took it out. Liveness AFTER the round-trip is the
+          # only answer that means anything.
+          Start-Sleep -Seconds 5
+          $hub.Refresh()
+          if ($hub.HasExited) {
+            throw "hub answered MCP but then exited with code $($hub.ExitCode) — this is the Session 0 failure the spike exists to find"
+          }
+          Write-Host "hub still alive after the round-trip — Avalonia survived Session 0"
+
+          Stop-Process -Id $hub.Id -Force
+
+      - name: Hub logs
+        if: always()
+        run: |
+          foreach ($f in @("hub.out.log", "hub.err.log")) {
+            $p = "$env:RUNNER_TEMP\kc-logs\$f"
+            Write-Host "===== $f ====="
+            if (Test-Path $p) { Get-Content $p } else { Write-Host "(absent)" }
+          }
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spike-logs
+          path: ${{ runner.temp }}/kc-logs
+          if-no-files-found: warn

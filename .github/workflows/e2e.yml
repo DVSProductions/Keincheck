@@ -1,0 +1,237 @@
+name: E2E
+
+# Installs the hub the way a user does — vpk pack, then a silent Velopack Setup.exe —
+# builds the demo apps, and drives the whole MCP spine through the shipped stdio shim.
+#
+# Nothing else in this repository proves any of the following, because every other test
+# runs in-process against stub brokers and in-memory streams:
+#   * the hub binary starts at all;
+#   * keincheck-connect.exe ships co-located with it and can find it;
+#   * a real app attaches over the named pipe and is drivable;
+#   * record/replay actually re-drives a UI rather than merely reporting success;
+#   * the read-only gate refuses writes while still allowing reads;
+#   * a launched/restarted client keeps its id;
+#   * the packages restore and work in a consuming project.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# Required the day this moves to a self-hosted runner: the hub's pipe, its
+# single-instance mutex, port 3100 and %APPDATA%\Keincheck are all fixed per-user
+# names with no override, so two concurrent E2E jobs on one box would fight over
+# every one of them. On GitHub-hosted runners each job gets its own VM.
+concurrency:
+  group: keincheck-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Above every published release, so Velopack's UpdateManager finds nothing newer and
+  # the installed hub cannot self-update out from under the run. HubOptions.AutoUpdate is
+  # true and a real Velopack install genuinely does poll GitHub.
+  KEINCHECK_CI_VERSION: 99.0.0
+
+jobs:
+  e2e:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Cache NuGet
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'Directory.Build.props') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      # Pinned: an unpinned global tool means a vpk release can break this workflow on a
+      # day nobody touched the repository.
+      - name: Install vpk
+        run: dotnet tool install -g vpk --version 1.2.0
+
+      # ---- build the product exactly as release.yml does ----------------------
+
+      - name: Publish the hub (self-contained, win-x64, ReadyToRun)
+        run: >
+          dotnet publish Keincheck.Hub/Keincheck.Hub.csproj
+          -c Release -r win-x64 --self-contained true -p:PublishReadyToRun=true
+          -p:Version=${{ env.KEINCHECK_CI_VERSION }}
+          -o publish
+
+      - name: Publish the shim (Native AOT) and co-locate it
+        run: |
+          dotnet publish Keincheck.Connect/Keincheck.Connect.csproj -c Release -r win-x64 -o publish-shim
+          Copy-Item publish-shim/keincheck-connect.exe publish/ -Force
+
+      # No `vpk download github` — delta packages are irrelevant here and it is one more
+      # network dependency that can fail.
+      - name: Pack with Velopack
+        run: >
+          vpk pack -u Keincheck.Hub -v ${{ env.KEINCHECK_CI_VERSION }}
+          -p publish -e Keincheck.Hub.exe
+          --icon assets/icon.ico
+          --packTitle "Keincheck Hub" --packAuthors "Valentino Saitz"
+
+      - name: Install silently
+        run: |
+          $setup = "Releases\Keincheck.Hub-win-Setup.exe"
+          if (-not (Test-Path $setup)) { throw "vpk pack produced no installer at $setup" }
+          & $setup --silent --installto "$env:RUNNER_TEMP\kc-hub" --log "$env:RUNNER_TEMP\velopack-setup.log"
+          if ($LASTEXITCODE -ne 0) { throw "Setup.exe exited $LASTEXITCODE" }
+
+      - name: Assert the installed layout
+        run: |
+          $root = "$env:RUNNER_TEMP\kc-hub"
+          # <root>\Keincheck.Hub.exe is the Velopack STUB launcher: it re-execs the real
+          # binary and detaches, so the harness must never drive it. The real hub and the
+          # co-located shim live in <root>\current.
+          $expect = @(
+            "$root\current\Keincheck.Hub.exe",
+            "$root\current\keincheck-connect.exe",
+            "$root\Update.exe"
+          )
+          Get-ChildItem -Recurse $root | Select-Object -ExpandProperty FullName
+          $missing = $expect | Where-Object { -not (Test-Path $_) }
+          if ($missing) { throw "missing from the install: $($missing -join ', ')" }
+          "KEINCHECK_E2E_HUB_DIR=$root\current" | Out-File $env:GITHUB_ENV -Append
+
+      # ---- build the apps the hub will drive ----------------------------------
+
+      - name: Publish the demo apps
+        run: |
+          dotnet publish samples/Keincheck.Demo/Keincheck.Demo.csproj -c Release -o demo-avalonia
+          dotnet publish samples/Keincheck.Wpf.Demo/Keincheck.Wpf.Demo.csproj -c Release -o demo-wpf
+          "KEINCHECK_E2E_DEMO_EXE=$PWD\demo-avalonia\Keincheck.Demo.exe"      | Out-File $env:GITHUB_ENV -Append
+          "KEINCHECK_E2E_WPF_DEMO_EXE=$PWD\demo-wpf\Keincheck.Wpf.Demo.exe"   | Out-File $env:GITHUB_ENV -Append
+
+      # ---- the packaged consumer: restore + build + (later) run ---------------
+
+      - name: Pack the libraries to a local feed
+        run: |
+          $feed = "$env:RUNNER_TEMP\feed"
+          New-Item -ItemType Directory -Force $feed | Out-Null
+          foreach ($p in 'Keincheck.Protocol','Keincheck.Core','Keincheck.Client',
+                         'Keincheck.Avalonia','Keincheck.Wpf','Keincheck.Remote','Keincheck') {
+            dotnet pack "$p/$p.csproj" -c Release -o $feed -p:Version=${{ env.KEINCHECK_CI_VERSION }}
+            if ($LASTEXITCODE -ne 0) { throw "dotnet pack failed for $p" }
+          }
+          Get-ChildItem $feed -Filter *.nupkg | Select-Object -ExpandProperty Name
+
+      - name: Build the consumer app from the packages
+        run: |
+          # Copied OUT of the repository on purpose: inside it, the root
+          # Directory.Build.props would apply and the fixture would stop representing what
+          # a real consumer's build sees.
+          $dst = "$env:RUNNER_TEMP\consumer"
+          Copy-Item tests/fixtures/ConsumerApp $dst -Recurse -Force
+
+          @"
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources>
+              <clear />
+              <add key="local" value="$env:RUNNER_TEMP\feed" />
+              <add key="nuget" value="https://api.nuget.org/v3/index.json" />
+            </packageSources>
+          </configuration>
+          "@ | Set-Content "$dst\nuget.config" -Encoding UTF8
+
+          dotnet build "$dst\ConsumerApp.csproj" -c Release `
+            -p:KeincheckVersion=${{ env.KEINCHECK_CI_VERSION }} -o "$env:RUNNER_TEMP\consumer-out"
+          if ($LASTEXITCODE -ne 0) { throw "the packaged consumer failed to restore or build" }
+
+          "KEINCHECK_E2E_CONSUMER_EXE=$env:RUNNER_TEMP\consumer-out\ConsumerApp.exe" | Out-File $env:GITHUB_ENV -Append
+
+      - name: The Remote package's MSBuild targets were imported
+        run: |
+          # Proves build\Keincheck.Remote.targets travelled inside the package and was
+          # imported by the consumer — and that it is inert until opted into, which is the
+          # promise that keeps installing the package from making builds phone a hub.
+          $v = dotnet msbuild "$env:RUNNER_TEMP\consumer\ConsumerApp.csproj" `
+                 -getProperty:KeincheckRemoteEnroll -p:KeincheckVersion=${{ env.KEINCHECK_CI_VERSION }}
+          $v = "$v".Trim()
+          if ($v -ne 'false') { throw "build\Keincheck.Remote.targets was not imported (KeincheckRemoteEnroll='$v')" }
+          Write-Host "Keincheck.Remote.targets imported, enrollment off by default"
+
+      # ---- drive it -----------------------------------------------------------
+
+      - name: Main scenario, transports, WPF and the packaged consumer
+        env:
+          KEINCHECK_E2E: '1'
+          KEINCHECK_E2E_ARTIFACTS: ${{ runner.temp }}/kc-artifacts
+        run: >
+          dotnet test tests/Keincheck.E2E/Keincheck.E2E.csproj -c Release
+          --logger "trx;LogFileName=e2e-main.trx"
+          --results-directory ${{ runner.temp }}/kc-artifacts
+
+      # Separate invocations, each with a fresh hub. The remote leg provisions a real CA
+      # and attaches a second client; the cold-start leg has to begin with NO hub running.
+      # Both would corrupt the shared rig the main suite depends on if they ran alongside it.
+      - name: Remote access over loopback
+        env:
+          KEINCHECK_E2E: '1'
+          KEINCHECK_E2E_REMOTE: '1'
+          KEINCHECK_E2E_ARTIFACTS: ${{ runner.temp }}/kc-artifacts
+        run: >
+          dotnet test tests/Keincheck.E2E/Keincheck.E2E.csproj -c Release --no-build
+          --filter "FullyQualifiedName~RemoteLoopbackTests"
+          --logger "trx;LogFileName=e2e-remote.trx"
+          --results-directory ${{ runner.temp }}/kc-artifacts
+
+      - name: The shim starts a hub from cold
+        env:
+          KEINCHECK_E2E: '1'
+          KEINCHECK_E2E_SHIM_LAUNCH: '1'
+          KEINCHECK_E2E_ARTIFACTS: ${{ runner.temp }}/kc-artifacts
+        run: >
+          dotnet test tests/Keincheck.E2E/Keincheck.E2E.csproj -c Release --no-build
+          --filter "FullyQualifiedName~ShimLaunchTests"
+          --logger "trx;LogFileName=e2e-shim.trx"
+          --results-directory ${{ runner.temp }}/kc-artifacts
+
+      # ---- evidence -----------------------------------------------------------
+
+      - name: Collect hub state
+        if: always()
+        run: |
+          $out = "$env:RUNNER_TEMP\kc-artifacts\appdata"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $src = "$env:APPDATA\Keincheck"
+          if (Test-Path $src) {
+            # known-clients.json and the audit trail, but never the remote key material:
+            # ca.pfx / server.pfx / settings.json hold private keys and a PKCS#12 password.
+            Get-ChildItem $src -Recurse -File |
+              Where-Object { $_.Extension -notin '.pfx' -and $_.Name -ne 'settings.json' } |
+              ForEach-Object { Copy-Item $_.FullName $out -Force }
+            Get-ChildItem $out | Select-Object -ExpandProperty Name
+          } else {
+            Write-Host "no %APPDATA%\Keincheck — the hub never wrote any state"
+          }
+          Copy-Item "$env:RUNNER_TEMP\velopack-setup.log" $out -ErrorAction SilentlyContinue
+
+      - name: Show the hub log
+        if: failure()
+        run: |
+          $log = "$env:RUNNER_TEMP\kc-artifacts\hub.log"
+          if (Test-Path $log) { Get-Content $log -Tail 200 } else { Write-Host "(no hub log)" }
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          # Process logs, the decoded screenshots, the exported scenario/test, the trx
+          # files and the hub's on-disk state. A Session-0 rendering failure is only
+          # diagnosable by looking at screenshot_window.png.
+          name: e2e-artifacts
+          path: ${{ runner.temp }}/kc-artifacts
+          if-no-files-found: warn
