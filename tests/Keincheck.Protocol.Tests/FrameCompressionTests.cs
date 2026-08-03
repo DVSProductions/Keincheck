@@ -137,26 +137,99 @@ public class FrameCompressionTests
 
     // ---------------------------------------------------------------- adversarial
 
-    [Fact]
-    public async Task Compression_Bomb_Is_Refused_Not_Allocated()
+    /// <summary>A frame carrying <paramref name="size"/> bytes of zeroes, compressed.</summary>
+    private static byte[] BombFrame(int size)
     {
-        // 64 MiB of zeroes compresses to a couple of KiB. A reader that inflated first and
-        // checked afterwards would allocate all 64 MiB on behalf of an unauthenticated peer.
-        var bomb = new byte[64 * 1024 * 1024];
         using var compressed = new MemoryStream();
         using (var brotli = new BrotliStream(compressed, CompressionLevel.Optimal, leaveOpen: true))
-            brotli.Write(bomb, 0, bomb.Length);
+            brotli.Write(new byte[size], 0, size);
 
-        var compressedBytes = compressed.ToArray();
-        Assert.True(compressedBytes.Length < 256 * 1024, "the bomb must actually be small on the wire");
+        var payload = compressed.ToArray();
+        Assert.True(payload.Length < 256 * 1024, "the bomb must actually be small on the wire");
 
-        using var ms = new MemoryStream();
-        WriteRawFrame(ms, compressedBytes, compressedFlag: true);
-        ms.Position = 0;
+        using var framed = new MemoryStream();
+        WriteRawFrame(framed, payload, compressedFlag: true);
+        return framed.ToArray();
+    }
+
+    [Theory]
+    [InlineData(1024 * 1024)]
+    [InlineData(4 * 1024 * 1024)]
+    public async Task A_Compression_Bomb_Is_Refused_Against_The_CALLER_S_Cap(int cap)
+    {
+        // 64 MiB of zeroes compresses to a couple of KiB.
+        //
+        // Parameterised over two caps, and asserting the cap's VALUE, because the previous
+        // version of this test only matched the message prefix. That let the guard use any
+        // constant it liked: swapping the caller's maxMessageSize for
+        // FrameCodec.DefaultMaxMessageSize still threw (64 MiB > 32 MiB), still matched, and
+        // still passed -- while an unauthenticated peer bounded to ChannelLimits.Handshake's
+        // 16 KiB could make the hub inflate 32 MiB.
+        using var ms = new MemoryStream(BombFrame(64 * 1024 * 1024));
 
         var ex = await Assert.ThrowsAsync<ProtocolException>(() =>
-            FrameCodec.TryReadAsync(ms, maxChunkPayload: 1024 * 1024, maxMessageSize: 1024 * 1024));
-        Assert.Contains("Decompressed message would exceed", ex.Message);
+            FrameCodec.TryReadAsync(ms, maxChunkPayload: 1024 * 1024, maxMessageSize: cap));
+
+        Assert.Contains($"exceed the maximum of {cap} bytes", ex.Message);
+    }
+
+    [Fact]
+    public void A_Compression_Bomb_Is_Refused_WITHOUT_Inflating_It_First()
+    {
+        // The other half of the name, which was previously unasserted entirely. Rewriting
+        // Decompress as "inflate fully, then compare" keeps the same exception and the same
+        // message, so no assertion on the throw can distinguish it -- yet it removes the bound
+        // completely: the allocation becomes the full decompressed size, limited only by
+        // MemoryStream's ~2 GiB ceiling. Measuring allocation is the only thing that tells
+        // "refused" apart from "refused, after doing the damage".
+        const int Cap = 1024 * 1024;
+        var frame = BombFrame(64 * 1024 * 1024);
+
+        // Warm up so first-call JIT and BrotliStream's own setup are not counted.
+        try { Read(BombFrame(2 * 1024 * 1024)); } catch (ProtocolException) { }
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        Assert.Throws<ProtocolException>(() => Read(frame));
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        // A bounded reader allocates roughly the cap plus its read buffer. An inflate-first
+        // reader allocates the full 64 MiB (and more, as the MemoryStream doubles). 16 MiB
+        // sits far from both.
+        Assert.True(allocated < 16 * 1024 * 1024,
+            $"decompression allocated {allocated / (1024 * 1024)} MiB for a {Cap / (1024 * 1024)} MiB cap; " +
+            "the bound is being applied after inflating rather than as output is produced.");
+
+        static void Read(byte[] framed)
+        {
+            using var ms = new MemoryStream(framed);
+            // Synchronous on purpose: allocation is measured per-thread, and a MemoryStream
+            // read completes inline so nothing hops to the pool.
+#pragma warning disable xUnit1031
+            FrameCodec.TryReadAsync(ms, maxChunkPayload: 1024 * 1024, maxMessageSize: Cap)
+                .GetAwaiter().GetResult();
+#pragma warning restore xUnit1031
+        }
+    }
+
+    [Fact]
+    public async Task A_Compressed_Frame_Is_Bounded_By_The_Pre_Auth_Handshake_Clamp()
+    {
+        // The composition that exists in production and appeared in no test: a channel still
+        // on ChannelLimits.Handshake (StreamTransport builds one for every accepted socket)
+        // receiving a compressed frame. Reading a compressed frame is always supported even
+        // when writing them is not, so a peer that has done nothing but complete TCP and TLS
+        // can reach the decompressor -- against a 16 KiB budget, not the 32 MiB default.
+        using var backing = new MemoryStream(BombFrame(64 * 1024 * 1024));
+        using var channel = new PipeChannel(backing, ownsStream: false, ChannelLimits.Handshake);
+
+        var ex = await Assert.ThrowsAsync<ProtocolException>(() => channel.ReceiveAsync());
+
+        // Whatever it complains about, the figure must be the handshake budget -- never the
+        // default. Either guard may fire first; both must use the channel's own limits.
+        Assert.Contains(
+            ChannelLimits.Handshake.MaxMessageSize.ToString(),
+            ex.Message + ChannelLimits.Handshake.MaxChunkPayload);
+        Assert.DoesNotContain(FrameCodec.DefaultMaxMessageSize.ToString(), ex.Message);
     }
 
     [Fact]
