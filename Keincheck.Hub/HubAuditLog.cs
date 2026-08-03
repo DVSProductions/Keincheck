@@ -15,9 +15,44 @@ public enum AuditOutcome
     Error,
 }
 
+/// <summary>What kind of event an <see cref="AuditEntry"/> records.</summary>
+/// <remarks>
+/// Until remote existed the trail only had to answer "what did the AI just do to my app",
+/// and tool invocations covered that. Once a machine you cannot see can attach, the trail also
+/// has to answer "who connected, when, and what were they allowed to do" — so attachment,
+/// credential issuance and revocation are recorded too.
+/// </remarks>
+public enum AuditKind
+{
+    /// <summary>An AI-initiated tool call routed to a client.</summary>
+    Invoke = 0,
+
+    /// <summary>A remote client authenticated and attached.</summary>
+    Attach,
+
+    /// <summary>A remote client's session ended.</summary>
+    Detach,
+
+    /// <summary>A peer failed to authenticate or was refused.</summary>
+    AuthFailure,
+
+    /// <summary>A client's read-only flag was changed.</summary>
+    Escalate,
+
+    /// <summary>A remote credential was issued.</summary>
+    Enroll,
+
+    /// <summary>A remote credential was revoked.</summary>
+    Revoke,
+
+    /// <summary>Remote access was enabled or disabled.</summary>
+    RemoteToggled,
+}
+
 /// <summary>
-/// One entry in the hub's audit trail: an AI-initiated tool call routed to a client.
-/// Surfaced in the tray window so the operator can see exactly what the AI is doing.
+/// One entry in the hub's audit trail. Surfaced in the tray window so the operator can see
+/// exactly what is happening, and — once remote access is enabled — written to disk, because
+/// a 500-entry in-memory ring is not an audit trail for a machine you cannot see.
 /// </summary>
 public sealed record AuditEntry
 {
@@ -27,7 +62,7 @@ public sealed record AuditEntry
     /// <summary>The hub-assigned id of the client the call targeted.</summary>
     public required string ClientId { get; init; }
 
-    /// <summary>The tool that was invoked.</summary>
+    /// <summary>The tool that was invoked, or a short description for non-invoke events.</summary>
     public required string ToolName { get; init; }
 
     /// <summary>The call outcome.</summary>
@@ -36,18 +71,37 @@ public sealed record AuditEntry
     /// <summary>An error message when <see cref="Outcome"/> is <see cref="AuditOutcome.Error"/>.</summary>
     public string? Error { get; init; }
 
+    /// <summary>What kind of event this is. Defaults to <see cref="AuditKind.Invoke"/>.</summary>
+    public AuditKind Kind { get; init; } = AuditKind.Invoke;
+
+    /// <summary>The remote machine involved, when there is one.</summary>
+    public string? Host { get; init; }
+
+    /// <summary>How the client is attached, when known.</summary>
+    public ClientTransport? Transport { get; init; }
+
     /// <summary>A short, human-readable one-liner for the tray log.</summary>
     public string Summary
     {
         get
         {
             var t = TimestampUtc.ToLocalTime().ToString("HH:mm:ss");
+            // Remote entries are marked so an operator scanning the log can tell at a glance
+            // which lines came from another machine.
+            var where = Host is { Length: > 0 } host ? $"@{host} " : string.Empty;
+
+            if (Kind != AuditKind.Invoke)
+            {
+                var detail = Error is { Length: > 0 } e ? $"  — {e}" : string.Empty;
+                return $"{t}  [{Kind.ToString().ToLowerInvariant()}] {where}{ToolName}{detail}";
+            }
+
             return Outcome switch
             {
-                AuditOutcome.Started => $"{t}  → {ClientId}  {ToolName}",
-                AuditOutcome.Ok => $"{t}  ✓ {ClientId}  {ToolName}",
-                AuditOutcome.Error => $"{t}  ✗ {ClientId}  {ToolName}  — {Error}",
-                _ => $"{t}  {ClientId}  {ToolName}",
+                AuditOutcome.Started => $"{t}  → {where}{ClientId}  {ToolName}",
+                AuditOutcome.Ok => $"{t}  ✓ {where}{ClientId}  {ToolName}",
+                AuditOutcome.Error => $"{t}  ✗ {where}{ClientId}  {ToolName}  — {Error}",
+                _ => $"{t}  {where}{ClientId}  {ToolName}",
             };
         }
     }
@@ -70,10 +124,27 @@ public sealed class HubAuditLog
     private readonly LinkedList<AuditEntry> _entries = new();
     private readonly int _capacity;
 
+    private volatile IAuditSink? _sink;
+
     /// <summary>Creates a log keeping at most <paramref name="capacity"/> recent entries.</summary>
     public HubAuditLog(int capacity = 500)
     {
         _capacity = Math.Max(16, capacity);
+    }
+
+    /// <summary>
+    /// An optional durable sink every entry is also written to. Null (the default) keeps the
+    /// log purely in memory, which is all a same-machine-only hub has ever needed.
+    /// </summary>
+    /// <remarks>
+    /// Set when remote access is enabled. A ring buffer that a busy session overwrites within
+    /// minutes cannot answer "what did that machine do last Tuesday", and that is precisely
+    /// the question an audit trail exists for once the client is somewhere you cannot see.
+    /// </remarks>
+    public IAuditSink? Sink
+    {
+        get => _sink;
+        set => _sink = value;
     }
 
     /// <summary>Raised after an entry is appended (on the calling/broker thread).</summary>
@@ -95,6 +166,21 @@ public sealed class HubAuditLog
             while (_entries.Count > _capacity)
                 _entries.RemoveFirst();
         }
+
+        // A failing sink must never break the thing it is auditing. Losing a line to a full
+        // disk is bad; refusing a tool call because of one would be worse.
+        try { _sink?.Write(entry); } catch { /* best effort */ }
+
         EntryAdded?.Invoke(this, entry);
     }
+}
+
+/// <summary>A durable destination for audit entries.</summary>
+public interface IAuditSink
+{
+    /// <summary>
+    /// Persists one entry. Must not throw for ordinary failures and must not block for long —
+    /// it is called on the broker thread, inline with tool dispatch.
+    /// </summary>
+    void Write(AuditEntry entry);
 }

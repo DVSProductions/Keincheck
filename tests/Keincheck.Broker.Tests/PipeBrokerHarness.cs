@@ -104,19 +104,20 @@ internal sealed class PipeBrokerHarness : IAsyncDisposable
     {
         ClientSession session;
         bool readOnly;
+        IReadOnlyList<ToolDescriptor> tools;
         lock (_gate)
         {
             if (!_sessions.TryGetValue(clientId, out var s) || !_known.TryGetValue(clientId, out var info) || !info.IsConnected)
                 throw new InvalidOperationException($"Client '{clientId}' is not connected.");
             session = s;
             readOnly = info.ReadOnly;
+            tools = info.Tools;
         }
 
-        // Read-only gate: refuse a mutating tool before it ever hits the wire. The
-        // production broker derives mutating-ness from the tool's annotations; the
-        // harness uses the same read-only inspection/screenshot heuristic the client
-        // applies so the rejection is symmetric.
-        if (readOnly && IsMutatingTool(toolName))
+        // Read-only gate: refuse a mutating tool before it ever hits the wire, using the
+        // client's own declared classification where it gave one — same rule, same
+        // precedence, as the production broker.
+        if (readOnly && IsMutatingTool(toolName, tools))
             throw new InvalidOperationException($"Client '{clientId}' is read-only; '{toolName}' is refused.");
 
         var correlationId = Guid.NewGuid().ToString("N");
@@ -316,14 +317,31 @@ internal sealed class PipeBrokerHarness : IAsyncDisposable
     }
 
     /// <summary>
-    /// Same read-only classification the client applies: <c>get_*</c>, the well-known
-    /// read-only inspection tools, and <c>screenshot_*</c> are non-mutating; everything
-    /// else mutates. Kept identical so the broker-side and client-side gates agree.
+    /// Same read-only classification the production broker applies, kept identical so the
+    /// broker-side and client-side gates agree: the client's declared
+    /// <see cref="ToolDescriptor.ReadOnly"/> wins, and the name heuristic
+    /// (<c>get_*</c> / the well-known inspection tools / <c>screenshot_*</c>) is only the
+    /// fallback for clients that did not declare one. Fail-closed either way.
     /// </summary>
-    internal static bool IsMutatingTool(string name) => !(
-        name.StartsWith("get_", StringComparison.Ordinal)
-        || name is "list_windows" or "query_controls" or "hit_test" or "wait_for"
-        || name.StartsWith("screenshot_", StringComparison.Ordinal));
+    internal static bool IsMutatingTool(string name, IReadOnlyList<ToolDescriptor>? tools = null)
+    {
+        if (tools is not null)
+        {
+            foreach (var tool in tools)
+            {
+                if (!string.Equals(tool.Name, name, StringComparison.Ordinal))
+                    continue;
+                if (tool.ReadOnly is { } declared)
+                    return !declared;
+                break;
+            }
+        }
+
+        return !(
+            name.StartsWith("get_", StringComparison.Ordinal)
+            || name is "list_windows" or "query_controls" or "hit_test" or "wait_for"
+            || name.StartsWith("screenshot_", StringComparison.Ordinal));
+    }
 
     public async ValueTask DisposeAsync()
     {

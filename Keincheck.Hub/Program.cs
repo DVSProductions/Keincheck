@@ -44,6 +44,15 @@ public static class Program
         var broker = new PipeClientBroker(brokerOptions);
         broker.Start();
 
+        // Remote access. Constructing this opens nothing and provisions nothing: with no
+        // certificate authority there is nothing for a peer to authenticate against, so the
+        // listener refuses to bind and the credential issuer refuses every request. A hub
+        // whose owner never enabled remote access therefore holds no key material at all.
+        var remote = new Keincheck.Hub.Remote.RemoteAccess(
+            broker, broker.Audit, log: msg => Console.Error.WriteLine($"[keincheck-hub:remote] {msg}"));
+        remote.StartIfEnabled();
+        HubRuntime.Remote = remote;
+
         // The MCP server (meta-tools + proxy) + the MCP-over-pipe listener wrap the broker.
         HubRuntime.Start(broker, hubOptions);
 
@@ -67,6 +76,7 @@ public static class Program
             if (updater is not null)
                 updater.DisposeAsync().AsTask().GetAwaiter().GetResult();
             HubRuntime.StopAsync().GetAwaiter().GetResult();
+            remote.DisposeAsync().AsTask().GetAwaiter().GetResult();
             broker.DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
     }

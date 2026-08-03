@@ -168,8 +168,11 @@ public sealed class HubMcpServer : IAsyncDisposable
 
         // A call to a down/unknown client returns a structured error that names the
         // recovery tool instead of a raw transport failure.
-        if (_broker.ClientStatus(targetId) is not { IsConnected: true })
-            return HubMetaTools.DownClientError(targetId, "is not connected");
+        // Pass the snapshot so the recovery hint fits the client: a remote one cannot be
+        // restarted by the hub, so telling the model to try would be actively misleading.
+        var known = _broker.ClientStatus(targetId);
+        if (known is not { IsConnected: true })
+            return HubMetaTools.DownClientError(targetId, "is not connected", known);
 
         var toolName = StripQualifier(name, targetId);
 
@@ -205,9 +208,10 @@ public sealed class HubMcpServer : IAsyncDisposable
         catch (Exception ex)
         {
             // Most likely the client dropped mid-call — point the AI at recovery.
-            return _broker.ClientStatus(targetId) is { IsConnected: true }
+            var status = _broker.ClientStatus(targetId);
+            return status is { IsConnected: true }
                 ? HubMetaTools.ErrorResult($"Invoke failed on '{targetId}': {ex.Message}")
-                : HubMetaTools.DownClientError(targetId, $"dropped during the call ({ex.Message})");
+                : HubMetaTools.DownClientError(targetId, $"dropped during the call ({ex.Message})", status);
         }
     }
 
@@ -452,7 +456,11 @@ public sealed class HubMcpServer : IAsyncDisposable
         // (a) qualified name carries the client id.
         if (_options.QualifyToolNames)
         {
-            var dot = toolName.IndexOf('.');
+            // The LAST dot, not the first: a remote client id embeds a host name, which may
+            // itself contain dots (protoface@build.ci#1.get_logical_tree). Tool names never
+            // contain a dot, so splitting from the right is unambiguous where splitting from
+            // the left would truncate the client id to 'protoface@build'.
+            var dot = toolName.LastIndexOf('.');
             if (dot > 0)
                 return (toolName[..dot], args);
         }
@@ -474,6 +482,8 @@ public sealed class HubMcpServer : IAsyncDisposable
         _options.QualifyToolNames && name.StartsWith(clientId + ".", StringComparison.Ordinal)
             ? name[(clientId.Length + 1)..]
             : name;
+    // Note: this one is already correct for dotted client ids, because it matches the full
+    // client id as a prefix rather than searching for a separator.
 
     // ---- list_changed -----------------------------------------------------
 

@@ -74,6 +74,17 @@ public sealed class App : Application
         menu.Add(open);
         menu.Add(new NativeMenuItemSeparator());
         menu.Add(BuildClaudeSetupMenu());
+
+        // Only offered when this hub was built with remote support. Opening the panel does
+        // not enable anything; it is where an operator turns the listener on and issues the
+        // credentials that clients on other machines need.
+        if (HubRuntime.Remote is { } remote)
+        {
+            var remoteItem = new NativeMenuItem("Remote access…");
+            remoteItem.Click += (_, _) => ShowRemoteWindow(remote);
+            menu.Add(remoteItem);
+        }
+
         menu.Add(new NativeMenuItemSeparator());
         menu.Add(quit);
 
@@ -100,6 +111,25 @@ public sealed class App : Application
         // (once, marker-gated). Deferred to here — never on launch — so the hub stays
         // tray-only until intentionally opened.
         Dispatcher.UIThread.Post(TryOfferFirstRunSetup, DispatcherPriority.Background);
+    }
+
+    private Window? _remoteWindow;
+
+    /// <summary>Opens (or re-focuses) the remote-access panel.</summary>
+    private void ShowRemoteWindow(Remote.RemoteAccess remote)
+    {
+        // Rebuilt each time it is opened so the credential list and listener state are fresh;
+        // an operator who just revoked something must not be shown a stale view of it.
+        if (_remoteWindow is not null)
+        {
+            try { _remoteWindow.Close(); } catch { /* already gone */ }
+            _remoteWindow = null;
+        }
+
+        _remoteWindow = HubWindow.BuildRemoteWindow(remote);
+        _remoteWindow.Closed += (_, _) => _remoteWindow = null;
+        _remoteWindow.Show();
+        _remoteWindow.Activate();
     }
 
     /// <summary>The "Set up in Claude ▸ …" tray submenu — re-runnable, registers the MCP server.</summary>

@@ -37,10 +37,29 @@ public sealed class ClientRow : INotifyPropertyChanged
     }
 
     public string ClientId => _info.ClientId;
-    public string Display => string.IsNullOrEmpty(_info.DisplayName) ? _info.ClientId : _info.DisplayName!;
+
+    /// <summary>
+    /// The row's title. A remote client is suffixed with the machine it runs on, so it is
+    /// never mistaken for the local instance of the same app sitting next to it in the list.
+    /// </summary>
+    public string Display
+    {
+        get
+        {
+            var name = string.IsNullOrEmpty(_info.DisplayName) ? _info.ClientId : _info.DisplayName!;
+            return _info.Host is { Length: > 0 } host ? $"{name}  @{host}" : name;
+        }
+    }
+
     public bool IsConnected => _info.IsConnected;
     public bool ReadOnly => _info.ReadOnly;
     public int ToolCount => _info.Tools.Count;
+
+    /// <summary>True when this client is on another machine (drives the row's remote badge).</summary>
+    public bool IsRemote => _info.IsRemote;
+
+    /// <summary>False for remote clients, which the hub cannot launch or restart.</summary>
+    public bool CanLaunch => _info.CanLaunch;
 
     public string StatusLine
     {
@@ -49,14 +68,21 @@ public sealed class ClientRow : INotifyPropertyChanged
             var state = _info.IsConnected ? "connected" : "offline";
             var ro = _info.ReadOnly ? " · read-only" : string.Empty;
             var active = _isActive ? " · ACTIVE" : string.Empty;
-            var pid = _info.ProcessId > 0 ? $" · pid {_info.ProcessId}" : string.Empty;
-            return $"{state}{pid} · {_info.Tools.Count} tools{ro}{active}";
+            var pid = _info.ProcessId > 0 && !_info.IsRemote ? $" · pid {_info.ProcessId}" : string.Empty;
+            // Say "remote" outright. The operator needs to know at a glance that a line in
+            // this list represents a machine that is not in front of them.
+            var where = _info.IsRemote ? " · REMOTE" : string.Empty;
+            return $"{state}{where}{pid} · {_info.Tools.Count} tools{ro}{active}";
         }
     }
 
     private void RaiseAll()
     {
-        foreach (var p in new[] { nameof(Display), nameof(IsConnected), nameof(ReadOnly), nameof(ToolCount), nameof(StatusLine) })
+        foreach (var p in new[]
+        {
+            nameof(Display), nameof(IsConnected), nameof(ReadOnly), nameof(ToolCount),
+            nameof(StatusLine), nameof(IsRemote), nameof(CanLaunch),
+        })
             Raise(p);
     }
 

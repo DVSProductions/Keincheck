@@ -73,6 +73,10 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     private string? _lastActive;
     private int _disposed;
 
+    // Null unless remote access is set up. A hub with no issuer refuses every enrollment
+    // request, which is the correct default for one whose owner never asked for remote access.
+    private volatile Remote.ICredentialIssuer? _credentialIssuer;
+
     /// <summary>Creates the broker. Call <see cref="Start"/> to begin accepting clients.</summary>
     public PipeClientBroker(BrokerOptions? options = null, KnownClientStore? store = null, HubAuditLog? audit = null)
     {
@@ -86,17 +90,40 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
         foreach (var profile in _store.All())
         {
             var hubId = ReserveSuffix(profile.AppId, preferred: 1);
+            var isRemote = !string.IsNullOrEmpty(profile.Host);
             _seen[hubId] = new ClientInfo
             {
                 ClientId = hubId,
-                AppId = profile.AppId,
+                // profile.AppId is the persistence key, which for a remote entry is the
+                // composite AppId@Host. Split it back apart so the bare app id is reported.
+                AppId = isRemote ? StripHost(profile.AppId, profile.Host!) : profile.AppId,
                 DisplayName = profile.DisplayName ?? profile.AppId,
                 IsConnected = false,
                 ReadOnly = profile.ReadOnly,
                 ExecutablePath = profile.ExecutablePath,
                 LastSeenUtc = profile.LastSeenUtc,
+                // A restored remote entry must NOT look local: CanLaunch defaults to true, and
+                // a remembered-but-offline remote app is exactly the case where an operator
+                // reaches for hub_launch_client. Getting this wrong would start a local
+                // process for a machine that is not here.
+                Host = profile.Host,
+                Transport = isRemote ? ClientTransport.Tcp : ClientTransport.Pipe,
+                CanLaunch = !isRemote,
             };
         }
+    }
+
+    /// <summary>The registry/persistence key for a client: <c>AppId</c>, or <c>AppId@Host</c> when remote.</summary>
+    internal static string IdentityOf(string appId, string? host) =>
+        string.IsNullOrEmpty(host) ? appId : $"{appId}@{host}";
+
+    /// <summary>Recovers the bare app id from a composite <c>AppId@Host</c> persistence key.</summary>
+    private static string StripHost(string identity, string host)
+    {
+        var suffix = "@" + host;
+        return identity.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
+            ? identity[..^suffix.Length]
+            : identity;
     }
 
     /// <summary>The audit log of AI tool calls; bound by the tray UI.</summary>
@@ -107,6 +134,20 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
 
     /// <summary>The control pipe this broker listens on.</summary>
     public string PipeName => _pipeName;
+
+    /// <summary>
+    /// Who issues remote credentials for <see cref="MessageKind.EnrollRequest"/> arriving on
+    /// the local pipe. Null (the default) refuses every request.
+    /// </summary>
+    /// <remarks>
+    /// Settable so the hub can switch remote access on and off at runtime without restarting
+    /// the broker or dropping connected clients.
+    /// </remarks>
+    public Remote.ICredentialIssuer? CredentialIssuer
+    {
+        get => _credentialIssuer;
+        set => _credentialIssuer = value;
+    }
 
     /// <summary>Starts the pipe accept loop and the heartbeat watchdog.</summary>
     public void Start()
@@ -136,7 +177,7 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
             }
 
             // Service this connection concurrently; loop back to accept the next.
-            _ = ServeClientAsync(channel, ct);
+            _ = ServeClientAsync(channel, ClientSessionContext.LocalPipe, ct);
         }
     }
 
@@ -146,9 +187,18 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     /// loop calls it for real connections.
     /// </summary>
     public Task AcceptChannel(PipeChannel channel, CancellationToken cancellationToken = default)
-        => ServeClientAsync(channel, cancellationToken);
+        => ServeClientAsync(channel, ClientSessionContext.LocalPipe, cancellationToken);
 
-    private async Task ServeClientAsync(PipeChannel channel, CancellationToken ct)
+    /// <summary>
+    /// Drives the receive loop for a session whose transport-level facts are already
+    /// established. A remote listener passes the host it read off the validated certificate,
+    /// so the registry records where a client is from rather than taking its word for it.
+    /// </summary>
+    public Task AcceptChannel(
+        PipeChannel channel, ClientSessionContext context, CancellationToken cancellationToken = default)
+        => ServeClientAsync(channel, context ?? ClientSessionContext.LocalPipe, cancellationToken);
+
+    private async Task ServeClientAsync(PipeChannel channel, ClientSessionContext context, CancellationToken ct)
     {
         LiveClient? client = null;
         try
@@ -162,7 +212,17 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
                 switch (envelope.Kind)
                 {
                     case MessageKind.Register:
-                        client = HandleRegister(channel, envelope);
+                        // Exactly one registration per connection. A client that wants a fresh
+                        // identity reconnects; nothing legitimate re-registers on a live
+                        // session. Without this, one authenticated peer could stream Register
+                        // frames and mint a LiveClient per frame — and because suffix
+                        // allocation probes the live set linearly while holding the registry
+                        // lock, a few thousand of them stall every other caller (MCP dispatch,
+                        // the pipe accept loop, the tray) for seconds at a time.
+                        if (client is not null)
+                            throw new ProtocolException(
+                                $"Client '{client.ClientId}' sent a second Register on one session.");
+                        client = HandleRegister(channel, context, envelope);
                         break;
 
                     case MessageKind.ToolList:
@@ -180,6 +240,13 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
                     case MessageKind.ClientDown:
                         HandleClientDown(client, envelope);
                         return;
+
+                    case MessageKind.EnrollRequest:
+                        // An enrollment session is not a client session: it asks one question,
+                        // gets one answer, and closes. It never registers, so it never appears
+                        // in the registry.
+                        await HandleEnrollAsync(channel, context, envelope, ct).ConfigureAwait(false);
+                        return;
                 }
             }
         }
@@ -196,9 +263,57 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
         }
     }
 
+    // ===================================================================== enrollment
+
+    /// <summary>
+    /// Serves a credential-enrollment request. Local pipe only.
+    /// </summary>
+    /// <remarks>
+    /// The transport check is the whole security property here, so it is the first thing that
+    /// happens: a remote peer must never be able to mint further credentials, or one leaked
+    /// build certificate becomes an unbounded, self-renewing grant. (The remote handshake
+    /// already refuses this message kind before a session can even reach the broker; this is
+    /// the second, independent gate — the kind of thing that must not depend on one check in
+    /// one place staying correct.)
+    /// </remarks>
+    private async Task HandleEnrollAsync(
+        PipeChannel channel, ClientSessionContext context, MessageEnvelope envelope, CancellationToken ct)
+    {
+        if (context.IsRemote)
+        {
+            await channel.SendAsync(MessageKind.Rejected, new RejectedMessage
+            {
+                Code = RejectReason.NotPermittedOnTransport,
+                Reason = "Credentials can only be issued over the local control pipe.",
+            }, envelope.CorrelationId, ct).ConfigureAwait(false);
+            return;
+        }
+
+        EnrollResponseMessage response;
+        var issuer = _credentialIssuer;
+        if (issuer is null)
+        {
+            response = new EnrollResponseMessage
+            {
+                Accepted = false,
+                Reason = "This hub cannot issue remote credentials. Enable remote access in the hub window.",
+            };
+        }
+        else
+        {
+            var request = envelope.Unwrap<EnrollRequestMessage>();
+            response = request is null
+                ? new EnrollResponseMessage { Accepted = false, Reason = "The enrollment request was empty." }
+                : issuer.Issue(request);
+        }
+
+        await channel.SendAsync(MessageKind.EnrollResponse, response, envelope.CorrelationId, ct)
+            .ConfigureAwait(false);
+    }
+
     // ===================================================================== register
 
-    private LiveClient HandleRegister(PipeChannel channel, MessageEnvelope envelope)
+    private LiveClient HandleRegister(PipeChannel channel, ClientSessionContext context, MessageEnvelope envelope)
     {
         var reg = envelope.Unwrap<RegisterMessage>()
             ?? throw new ProtocolException("Register payload was empty.");
@@ -208,8 +323,27 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
                 $"Client '{reg.ClientId}' speaks protocol v{reg.ProtocolVersion}; hub supports " +
                 $"[{ProtocolVersion.Minimum}, {ProtocolVersion.Current}].");
 
-        var appId = string.IsNullOrWhiteSpace(reg.ClientId) ? "avalonia-app" : reg.ClientId;
-        var (path, args, cwd) = ResolveProcessProfile(reg.ProcessId);
+        // The app id is entirely client-chosen and reaches the registry keys, the hub id, and
+        // the wait-for filters, so it is sanitised rather than trusted. Two things this stops:
+        // an id containing '@' or '#' can otherwise impersonate the `AppId@Host` disambiguator
+        // (a remote client registering as "protoface@OP3R4T0RV2" would be RETURNED by
+        // hub_wait_for_client for that filter, and the operator's calls would go to it); and an
+        // unbounded id is a free way to bloat every dictionary that keys on it.
+        var appId = SanitizeAppId(reg.ClientId);
+
+        // The suffix space is keyed on the FULL identity, not the bare app id: a local
+        // 'protoface' and a remote 'protoface@OP3R4T0RV2' are different apps that both want
+        // slot #1, and sharing a key would hand them the same hub id.
+        var identity = context.IsRemote && !string.IsNullOrEmpty(context.Host)
+            ? $"{appId}@{context.Host}"
+            : appId;
+
+        // A process id is only meaningful on this machine. Reusing a remote client's pid for
+        // the stale-session dedup below would collide with an unrelated LOCAL process.
+        var localProcessId = context.IsRemote ? 0 : reg.ProcessId;
+        var (path, args, cwd) = context.CanLaunch
+            ? ResolveProcessProfile(reg.ProcessId)
+            : (null, null, null);
 
         ClientInfo info;
         LiveClient live;
@@ -223,9 +357,10 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
             // instead of minting a fresh suffix, so one process never piles up as #2/#3.
             // Only when the pid is known (>0); an unknown pid falls back to a fresh slot.
             string hubId;
-            if (reg.ProcessId > 0
+            if (localProcessId > 0
                 && _live.Values.FirstOrDefault(c =>
-                       c.ProcessId == reg.ProcessId
+                       c.ProcessId == localProcessId
+                       && !c.IsRemote
                        && string.Equals(c.AppId, appId, StringComparison.OrdinalIgnoreCase))
                    is { } stale)
             {
@@ -235,13 +370,27 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
             }
             else
             {
-                hubId = ReserveSuffix(appId, preferred: NextFreeSuffix(appId));
+                hubId = ReserveSuffix(identity, preferred: NextFreeSuffix(identity));
             }
 
             var existingReadOnly =
                 (supersededStale?.ReadOnly ?? false)
                 || (_seen.TryGetValue(hubId, out var prior) && prior.ReadOnly);
-            var profileReadOnly = _store.Get(appId)?.ReadOnly ?? false;
+
+            // The persisted decision is keyed on the FULL identity, so the suit and the copy of
+            // the same app on this desk keep separate settings.
+            var persisted = _store.Get(identity);
+
+            // A remembered decision WINS over the transport's default — that is what makes
+            // "let me drive the suit" survive the wifi dropping out. Only a client the operator
+            // has never ruled on falls back to read-only-because-remote. (Note this reads the
+            // persisted value directly rather than OR-ing it: an OR could never express
+            // "explicitly allowed", which is the whole point.)
+            bool readOnly;
+            if (persisted is not null)
+                readOnly = persisted.ReadOnly || existingReadOnly;
+            else
+                readOnly = context.ReadOnlyDefault || existingReadOnly;
 
             live = new LiveClient(hubId, appId, channel)
             {
@@ -250,10 +399,17 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
                 ExecutablePath = path,
                 Arguments = args,
                 WorkingDirectory = cwd,
-                ReadOnly = existingReadOnly || profileReadOnly,
+                // Remote starts read-only until the operator says otherwise; their decision is
+                // then remembered per machine (see above).
+                ReadOnly = readOnly,
                 OwnsWindows = reg.OwnsWindows,
                 ClientVersion = reg.ClientVersion,
                 ConnectedAtUtc = DateTimeOffset.UtcNow,
+                Transport = context.Transport,
+                Host = context.Host,
+                MachineId = context.MachineId ?? (context.IsRemote ? null : Environment.MachineName),
+                CanLaunch = context.CanLaunch,
+                IdentityKey = identity,
             };
             live.Touch();
             _live[hubId] = live;
@@ -275,14 +431,18 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
             }
         }
 
-        // Persist the launch profile so this app can be relaunched later.
+        // Persist under the full identity. A remote entry deliberately carries NO executable
+        // path or arguments — there is no local process to start, and recording one is how a
+        // hub_launch_client for that id would end up starting a local copy of an app that only
+        // ever ran elsewhere. Its Host is what marks it remote on restore.
         _store.Upsert(new KnownClientProfile
         {
-            AppId = appId,
+            AppId = identity,
+            Host = context.Host,
             DisplayName = live.DisplayName,
-            ExecutablePath = path,
-            Arguments = args,
-            WorkingDirectory = cwd,
+            ExecutablePath = context.CanLaunch ? path : null,
+            Arguments = context.CanLaunch ? args : null,
+            WorkingDirectory = context.CanLaunch ? cwd : null,
             ReadOnly = live.ReadOnly,
             LastSeenUtc = DateTimeOffset.UtcNow,
         });
@@ -294,10 +454,17 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
         //     (finding-1 auto-reselect). A DIFFERENT client reconnecting must NOT steal
         //     active away from a deliberate manual selection made while the first was
         //     down — which is why we require live.ClientId == _lastActive here.
+        //
+        // A REMOTE client never auto-activates, even as the first client of a run. Tool calls
+        // are routed to whichever client is active, so auto-activating on connect would mean
+        // that whatever attaches first receives the operator's calls — arguments included —
+        // and answers them. Requiring an explicit hub_select_client keeps that a decision.
+        // Reclaiming a slot it was already deliberately selected for is still allowed.
         var becameActive = false;
         lock (_gate)
         {
-            if (_active is null && (_lastActive is null || live.ClientId == _lastActive))
+            var mayAutoActivate = !context.IsRemote || live.ClientId == _lastActive;
+            if (mayAutoActivate && _active is null && (_lastActive is null || live.ClientId == _lastActive))
             {
                 _active = live.ClientId;
                 _lastActive = null; // consumed — don't re-steal on a later reconnect
@@ -373,7 +540,13 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
             // Release the reserved suffix so a restart of THIS app re-takes the same
             // slot (NextFreeSuffix + ReserveSuffix both then land on the freed number).
             // The hub-id stays in _seen so its history/profile is still listable.
-            ReleaseSuffix_NoLock(client.AppId, client.ClientId);
+            //
+            // MUST use the same key the reservation was made under. Releasing a remote client
+            // under its bare AppId missed its `AppId@Host` bucket entirely, so the slot leaked
+            // and the id climbed #1, #2, #3... on every reconnect — breaking the operator's
+            // selection on every wifi blip and growing _seen forever. It also removed a slot
+            // from an unrelated LOCAL app that happened to share the AppId.
+            ReleaseSuffix_NoLock(client.IdentityKey, client.ClientId);
             wasActive = _active == client.ClientId;
             if (wasActive)
             {
@@ -514,12 +687,19 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
 
         try
         {
+            // linked.Token, NOT the caller's: the timeout has to cover the SEND as well as the
+            // wait for a reply. A client that roams out of range leaves the hub's socket buffer
+            // full, so the write blocks while holding the channel's write lock, and a tool call
+            // queued behind it waits forever — the watchdog eventually disposes the channel,
+            // and disposing a SemaphoreSlim does not release anyone already parked on it. The
+            // 60s InvokeTimeout exists to prevent exactly this and previously never applied
+            // until after the send had returned.
             await client.Channel.SendAsync(MessageKind.InvokeTool, new InvokeToolMessage
             {
                 ClientId = client.AppId, // the app identifies itself by its self-reported id
                 ToolName = toolName,
                 Arguments = argumentsJson,
-            }, correlationId, cancellationToken).ConfigureAwait(false);
+            }, correlationId, linked.Token).ConfigureAwait(false);
 
             using (linked.Token.Register(static state =>
                 ((TaskCompletionSource<ToolResultMessage>)state!).TrySetCanceled(), tcs))
@@ -564,9 +744,65 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Refuses to start a process for a client that is not on this machine.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the most important guard in the remote work, because the failure it prevents is
+    /// <i>silent and plausible</i>: <c>protoface@OP3R4T0RV2#1</c> strips to
+    /// <c>protoface@OP3R4T0RV2</c>, which misses in the launch-profile store and would then
+    /// fall back to a second lookup that could resolve the LOCAL <c>protoface</c> profile.
+    /// The hub would start a local copy, report a process id, and the operator would believe
+    /// they had restarted the suit.
+    /// </para>
+    /// <para>
+    /// It checks the recorded <see cref="ClientInfo.CanLaunch"/> — a fact established by the
+    /// listener from the transport — rather than re-deriving remoteness by inspecting the id,
+    /// so it cannot be defeated by a client picking an app id with an <c>@</c> in it.
+    /// </para>
+    /// </remarks>
+    private void EnsureLaunchable(string clientId)
+    {
+        ClientInfo? known;
+        lock (_gate)
+        {
+            known = _live.TryGetValue(clientId, out var live)
+                ? Snapshot_NoLock(live)
+                : _seen.GetValueOrDefault(clientId);
+
+            // An exact miss is NOT a free pass. `hub_launch_client { clientId: "protoface" }`
+            // — the bare form the guide and the wait-filters actively encourage — matches
+            // neither dictionary, so the guard used to fall straight through to
+            // ResolveProfile("protoface"), find the LOCAL launch profile, and start a local
+            // copy while the only connected 'protoface' was the remote one. That is precisely
+            // the silent-and-plausible failure this guard exists to prevent, reached by the
+            // most natural spelling of the request. So an id that resolves ONLY to remote
+            // clients is refused too.
+            if (known is null)
+            {
+                var candidates = _live.Values
+                    .Where(c => string.Equals(c.AppId, clientId, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (candidates.Count > 0 && candidates.TrueForAll(c => !c.CanLaunch))
+                    known = Snapshot_NoLock(candidates[0]);
+            }
+        }
+
+        if (known is null || known.CanLaunch)
+            return;
+
+        var where = known.Host is { Length: > 0 } host ? $"on {host}" : "on another machine";
+        throw new InvalidOperationException(
+            $"'{clientId}' is a remote client; the hub cannot start or stop processes {where}. " +
+            "Start it from that machine, or use its own deployment/update mechanism.");
+    }
+
     /// <inheritdoc/>
     public Task<int> LaunchClientAsync(string clientId, CancellationToken cancellationToken = default)
     {
+        EnsureLaunchable(clientId);
+
         var profile = ResolveProfile(clientId)
             ?? throw new InvalidOperationException($"No launch profile recorded for '{clientId}'.");
         if (string.IsNullOrEmpty(profile.ExecutablePath))
@@ -579,6 +815,8 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     /// <inheritdoc/>
     public async Task<int> RestartClientAsync(string clientId, CancellationToken cancellationToken = default)
     {
+        EnsureLaunchable(clientId);
+
         // Capture the live pid (if any) so we can terminate the running instance, while
         // keeping the reserved hub-id so the relaunched app re-takes the same slot.
         int? livePid = null;
@@ -671,15 +909,30 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
         return null;
     }
 
-    // Whether a client snapshot satisfies a wait filter: null/empty matches anything;
-    // a non-empty filter matches the exact hub-id or the bare app-id (ordinal-insensitive).
+    /// <summary>
+    /// Whether a client snapshot satisfies a wait filter. A null/empty filter matches any
+    /// connected client; otherwise the filter must equal the hub id (<c>protoface@SUIT#1</c>),
+    /// the bare app id (<c>protoface</c>), or the app-and-host (<c>protoface@SUIT</c>).
+    /// </summary>
+    /// <remarks>
+    /// The app-and-host form matters because the bare app id deliberately still matches a
+    /// remote client — <c>hub_wait_for_client { appId: "protoface" }</c> should find the suit —
+    /// but with a local instance also running it would be a coin toss which one resolves.
+    /// The middle form is how a caller says which they meant without pinning an instance number.
+    /// </remarks>
     private static bool Matches(ClientInfo info, string? appIdOrClientId)
     {
         if (string.IsNullOrWhiteSpace(appIdOrClientId))
             return info.IsConnected;
-        return info.IsConnected
-            && (string.Equals(info.ClientId, appIdOrClientId, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(info.AppId, appIdOrClientId, StringComparison.OrdinalIgnoreCase));
+        if (!info.IsConnected)
+            return false;
+
+        if (string.Equals(info.ClientId, appIdOrClientId, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(info.AppId, appIdOrClientId, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return info.Host is { Length: > 0 } host
+            && string.Equals($"{info.AppId}@{host}", appIdOrClientId, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <inheritdoc/>
@@ -692,33 +945,50 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     // ===================================================================== read-only toggle
 
     /// <summary>
-    /// Sets the read-only flag for a client (tray toggle). Persists it on the app's
-    /// profile so it survives a restart, and raises <see cref="ClientUpdated"/>.
+    /// Sets the read-only flag for a client (tray toggle) and raises <see cref="ClientUpdated"/>.
     /// </summary>
+    /// <remarks>
+    /// The setting is persisted against the client's full identity — the bare app id for a
+    /// local app, <c>AppId@Host</c> for a remote one — so it survives both a reconnect and a
+    /// hub restart. Keying on the full identity is what keeps the two separate: lifting
+    /// read-only on the suit must not quietly make the copy of the same app on this desk
+    /// writable, and vice versa.
+    /// <para>
+    /// Remote clients still <i>start</i> read-only; what is remembered is the operator's
+    /// decision once they have made one. On a link that drops as often as a wearable's, having
+    /// to re-authorise after every blip made the permission meaningless in practice.
+    /// </para>
+    /// </remarks>
     public void SetReadOnly(string clientId, bool readOnly)
     {
         ClientInfo? info = null;
-        string? appId = null;
+        string? identity = null;
         lock (_gate)
         {
             if (_live.TryGetValue(clientId, out var live))
             {
                 live.ReadOnly = readOnly;
-                appId = live.AppId;
+                identity = live.IdentityKey;
                 info = Snapshot_NoLock(live);
             }
             else if (_seen.TryGetValue(clientId, out var seen))
             {
-                appId = seen.AppId;
+                identity = IdentityOf(seen.AppId ?? clientId, seen.Host);
                 info = seen with { ReadOnly = readOnly };
                 _seen[clientId] = info;
             }
         }
 
-        if (appId is not null)
-            _store.SetReadOnly(appId, readOnly);
+        if (identity is not null)
+            _store.SetReadOnly(identity, readOnly);
         if (info is not null)
+        {
+            _audit.Add(Remote.RemoteAudit.Entry(
+                AuditKind.Escalate,
+                readOnly ? $"'{clientId}' set read-only" : $"'{clientId}' allowed to accept mutating tools",
+                clientId: clientId, host: info.Host, transport: info.Transport));
             ClientUpdated?.Invoke(this, info);
+        }
     }
 
     // ===================================================================== id/slot helpers
@@ -801,12 +1071,89 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
         Tools = c.Tools,
         ExecutablePath = c.ExecutablePath,
         LastSeenUtc = c.LastSeenUtc,
+        Transport = c.Transport,
+        Host = c.Host,
+        MachineId = c.MachineId,
+        CanLaunch = c.CanLaunch,
     };
 
+    /// <summary>The longest app id the hub will accept; longer ids are truncated.</summary>
+    public const int MaxAppIdLength = 64;
+
+    /// <summary>
+    /// Coerces a client-reported app id into something safe to use as a registry key and as
+    /// part of a hub id.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The app id is chosen entirely by the client — it is the one identity field the hub does
+    /// <b>not</b> derive from the connection — yet it ends up in <c>_live</c>/<c>_seen</c>/
+    /// <c>_reservedSuffixes</c> keys, in the hub id, and in the filters
+    /// <c>hub_wait_for_client</c> matches on. Sanitising rather than rejecting keeps every
+    /// existing local app working (assembly names are already within this charset) while
+    /// removing three problems:
+    /// </para>
+    /// <list type="bullet">
+    ///   <item><c>@</c> and <c>#</c> are structural in <c>AppId@Host#n</c>. A remote client
+    ///   registering as <c>protoface@OP3R4T0RV2</c> would have its <c>AppId</c> compare equal
+    ///   to the app-and-host disambiguator, so <c>hub_wait_for_client</c> would hand the
+    ///   operator that client instead of the real one — and subsequent tool calls, arguments
+    ///   included, would go to it. The host half is unspoofable (it comes from the validated
+    ///   certificate); this closes the other half.</item>
+    ///   <item>An unbounded id is a free way to bloat every dictionary keyed on it.</item>
+    ///   <item>Control characters and whitespace corrupt the tray list and the audit trail.</item>
+    /// </list>
+    /// </remarks>
+    internal static string SanitizeAppId(string? reported)
+    {
+        if (string.IsNullOrWhiteSpace(reported))
+            return "avalonia-app";
+
+        var sb = new System.Text.StringBuilder(Math.Min(reported.Length, MaxAppIdLength));
+        foreach (var c in reported.Trim())
+        {
+            if (sb.Length >= MaxAppIdLength)
+                break;
+            var ok = c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9'
+                or '.' or '-' or '_' or '+';
+            sb.Append(ok ? c : '_');
+        }
+
+        var result = sb.ToString().Trim('.', '-');
+        return result.Length == 0 ? "avalonia-app" : result;
+    }
+
+    /// <summary>
+    /// Whether a read-only client may still run <paramref name="toolName"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The client's own <see cref="ToolDescriptor.ReadOnly"/> wins when it reported one: it
+    /// owns the tool implementations and already computes this to enforce its local gate,
+    /// so it is the authority. This method previously claimed to prefer the client's
+    /// annotation but never actually looked at it, leaving a bare name allow-list that
+    /// refused genuinely side-effect-free tools — <c>describe_screen</c>,
+    /// <c>wait_for_idle</c> (the list only matched <c>wait_for</c> exactly) and
+    /// <c>keincheck_guide</c> among them.
+    /// </para>
+    /// <para>
+    /// The name heuristic remains only as the fallback for v1 clients that predate the
+    /// field, and stays deliberately fail-closed: anything it does not recognise counts as
+    /// mutating. That default matters more than it used to, because remote clients start
+    /// read-only.
+    /// </para>
+    /// </remarks>
     private static bool IsReadOnlyTool(LiveClient client, string toolName)
     {
-        // Prefer the schema/annotation the client reported; fall back to the name
-        // heuristic used elsewhere in the codebase for tools without annotations.
+        foreach (var tool in client.Tools)
+        {
+            if (!string.Equals(tool.Name, toolName, StringComparison.Ordinal))
+                continue;
+            if (tool.ReadOnly is { } declared)
+                return declared;
+            break; // known tool, but the client did not classify it — fall through
+        }
+
         return toolName.StartsWith("get_", StringComparison.Ordinal)
             || toolName is "list_windows" or "query_controls" or "hit_test" or "wait_for"
             || toolName.StartsWith("screenshot_", StringComparison.Ordinal);
@@ -894,6 +1241,24 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
         public string? ClientVersion { get; set; }
         public DateTimeOffset ConnectedAtUtc { get; set; }
         public IReadOnlyList<ToolDescriptor> Tools { get; set; } = Array.Empty<ToolDescriptor>();
+
+        public ClientTransport Transport { get; set; } = ClientTransport.Pipe;
+        public string? Host { get; set; }
+        public string? MachineId { get; set; }
+        public bool CanLaunch { get; set; } = true;
+        public bool IsRemote => Transport != ClientTransport.Pipe;
+
+        /// <summary>
+        /// The key this client's instance suffix was reserved under — <c>AppId</c> locally,
+        /// <c>AppId@Host</c> for remote.
+        /// </summary>
+        /// <remarks>
+        /// Stored rather than recomputed on release. Reserving under one key and releasing
+        /// under another leaks the slot forever, so the id climbs <c>#1, #2, #3…</c> on every
+        /// reconnect — which on a flaky link means the operator's selection breaks every time
+        /// the machine blips, and <c>_seen</c> grows without bound.
+        /// </remarks>
+        public string IdentityKey { get; set; } = string.Empty;
 
         // Correlation table: correlationId -> awaiting invoke.
         public ConcurrentDictionary<string, TaskCompletionSource<ToolResultMessage>> Pending { get; } = new();
