@@ -1,0 +1,60 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- NuGet package metadata -->
+    <PackageId>Keincheck.Remote</PackageId>
+    <IsPackable>true</IsPackable>
+    <Version>0.9.0</Version>
+    <Authors>Keincheck</Authors>
+    <Description>Opt-in remote transport for Keincheck: mutually-authenticated TLS between a Keincheck client and a hub on another machine. Install this package ONLY in apps you want to be remotely debuggable — an app that does not reference it links no networking code at all.</Description>
+    <PackageTags>avalonia;mcp;remote;tls;mtls;debugging</PackageTags>
+    <IncludeBuildOutput>true</IncludeBuildOutput>
+  </PropertyGroup>
+
+  <!--
+    net8.0 is REQUIRED, not incidental: this must be consumable from the net8.0
+    Keincheck.Client. It rules out X509CertificateLoader (net9+), so certificate loading
+    goes through the X509Certificate2 constructor. The net10.0 hub consumes this fine.
+
+    DEPENDENCY-FREE beyond Keincheck.Protocol. Everything here is in-box on net8.0:
+    System.Net.Sockets, System.Net.Security (SslStream) and
+    System.Security.Cryptography.X509Certificates (CertificateRequest, ECDsa). Adding a
+    package reference here would push it onto every app that wants remote debugging, and
+    onto the hub — don't.
+
+    It references ONLY Keincheck.Protocol (where IChannelConnector lives), never
+    Keincheck.Client, so the hub can use the listener side without loading the client's
+    tool host and the MCP SDK.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\Keincheck.Protocol\Keincheck.Protocol.csproj" />
+  </ItemGroup>
+
+  <!--
+    RemoteTls.Validate is the single peer-validation gate and stays internal: it is a
+    security decision, not an API. The tests exercise it directly rather than only through a
+    handshake, because a hostile peer WILL present a certificate a cooperative client would
+    decline to send, so what must be proven is that the gate itself refuses it.
+  -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Keincheck.Remote.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <!--
+    Ships the optional build-time enrollment target and the keincheck-enroll tool it drives.
+    The target is OFF unless a consuming project sets KeincheckRemoteEnroll=true, so merely
+    installing this package never makes a build contact anything.
+  -->
+  <ItemGroup>
+    <None Include="build\Keincheck.Remote.targets" Pack="true" PackagePath="build\" />
+    <None Include="$(MSBuildThisFileDirectory)..\Keincheck.Enroll\bin\$(Configuration)\net8.0\**\*"
+          Pack="true" PackagePath="tools\" Visible="false" Condition="Exists('$(MSBuildThisFileDirectory)..\Keincheck.Enroll\bin\$(Configuration)\net8.0')" />
+  </ItemGroup>
+
+</Project>

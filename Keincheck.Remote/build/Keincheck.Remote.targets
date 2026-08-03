@@ -1,0 +1,66 @@
+<Project>
+
+  <!--
+    Optional build-time enrollment for Keincheck.Remote.
+
+    OFF by default. Every build phoning a hub would be surprising, would fill the hub's
+    issued-credential list, and would fail on any machine without one running. Opt in:
+
+      <PropertyGroup>
+        <KeincheckRemoteEnroll>true</KeincheckRemoteEnroll>
+        <KeincheckRemoteTarget>OP3R4T0RV2</KeincheckRemoteTarget>
+      </PropertyGroup>
+
+    The credential lands in $(IntermediateOutputPath) and is embedded as a resource, so it
+    never touches the source tree and cannot be committed by accident. Read it at runtime with
+    RemoteCredential.Parse(...) over the embedded resource, or point KEINCHECK_REMOTE_FILE at
+    a credential instead and skip this entirely.
+
+    A missing hub is a WARNING, never an error: CI machines have no hub, and a developer who
+    closed theirs should not have their build broken by it.
+  -->
+
+  <PropertyGroup>
+    <KeincheckRemoteEnroll Condition="'$(KeincheckRemoteEnroll)' == ''">false</KeincheckRemoteEnroll>
+    <KeincheckRemoteTarget Condition="'$(KeincheckRemoteTarget)' == ''">$(COMPUTERNAME)</KeincheckRemoteTarget>
+    <KeincheckRemoteRenewWithinDays Condition="'$(KeincheckRemoteRenewWithinDays)' == ''">14</KeincheckRemoteRenewWithinDays>
+    <KeincheckRemoteCredentialPath Condition="'$(KeincheckRemoteCredentialPath)' == ''">$(IntermediateOutputPath)keincheck-remote.credential</KeincheckRemoteCredentialPath>
+    <KeincheckEnrollExe Condition="'$(KeincheckEnrollExe)' == ''">$(MSBuildThisFileDirectory)..\tools\keincheck-enroll.exe</KeincheckEnrollExe>
+  </PropertyGroup>
+
+  <Target Name="KeincheckRemoteEnroll"
+          BeforeTargets="PrepareForBuild"
+          Condition="'$(KeincheckRemoteEnroll)' == 'true'">
+
+    <Error Condition="!Exists('$(KeincheckEnrollExe)')"
+           Text="KeincheckRemoteEnroll is on but keincheck-enroll was not found at '$(KeincheckEnrollExe)'. Set KeincheckEnrollExe to its path." />
+
+    <MakeDir Directories="$([System.IO.Path]::GetDirectoryName('$(KeincheckRemoteCredentialPath)'))" />
+
+    <!--
+      IgnoreExitCode: the tool distinguishes "no hub" (4) from "refused" (3), and neither
+      should stop a build that may not need a credential at all on this machine.
+    -->
+    <Exec Command="&quot;$(KeincheckEnrollExe)&quot; --target &quot;$(KeincheckRemoteTarget)&quot; --out &quot;$(KeincheckRemoteCredentialPath)&quot; --if-missing --renew-within $(KeincheckRemoteRenewWithinDays) --note &quot;build: $(MSBuildProjectName)&quot;"
+          ContinueOnError="true"
+          IgnoreExitCode="true"
+          StandardOutputImportance="low"
+          StandardErrorImportance="normal">
+      <Output TaskParameter="ExitCode" PropertyName="_KeincheckEnrollExit" />
+    </Exec>
+
+    <Warning Condition="'$(_KeincheckEnrollExit)' == '4'"
+             Text="Keincheck: no hub is running, so no remote credential was issued. This build will not be remotely debuggable." />
+    <Warning Condition="'$(_KeincheckEnrollExit)' == '3'"
+             Text="Keincheck: the hub refused to issue a remote credential. Enable remote access in the hub window." />
+  </Target>
+
+  <Target Name="KeincheckRemoteEmbedCredential"
+          AfterTargets="KeincheckRemoteEnroll"
+          Condition="'$(KeincheckRemoteEnroll)' == 'true' AND Exists('$(KeincheckRemoteCredentialPath)')">
+    <ItemGroup>
+      <EmbeddedResource Include="$(KeincheckRemoteCredentialPath)" LogicalName="Keincheck.Remote.Credential" />
+    </ItemGroup>
+  </Target>
+
+</Project>
