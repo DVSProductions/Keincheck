@@ -275,7 +275,7 @@ attach, detach and authentication failure with its reason.
 | Project | TFM | Role |
 |---|---|---|
 | `Keincheck.Protocol` | net8.0 | Zero-dependency wire: named-pipe transport, chunked framing, message DTOs |
-| `Keincheck.Core` | net8.0 | **Framework-free** introspection engine: registry, selectors, serializer, the 22 tools, and the neutral `IUiAdapter` / `IUiDispatcher` seam (no UI-toolkit reference) |
+| `Keincheck.Core` | net8.0 | **Framework-free** introspection engine: registry, selectors, serializer, the 27 UI tools, and the neutral `IUiAdapter` / `IUiDispatcher` seam (no UI-toolkit reference) |
 | `Keincheck.Avalonia` | net8.0 | Avalonia 12 adapter: `AvaloniaUiAdapter` + `AvaloniaUiDispatcher` behind the seam, plus the Avalonia `UseMcpClient` |
 | `Keincheck.Wpf` | net8.0-windows | WPF adapter — **in progress** (scaffolded `WpfUiAdapter`, real `WpfUiDispatcher`, `UseKeincheckClient`) |
 | `Keincheck.Client` | net8.0 | **Framework-free** broker client (`BrokerClientHost.Start`) — named-pipe, **no ASP.NET** |
