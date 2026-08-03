@@ -317,8 +317,14 @@ public sealed class SpineUiTests
         {
             var window = CyclicGraphFactory.Create(out _);
 
+            // The budget must stay well under the real stack depth, or the walk overflows
+            // before it can throw and takes the whole test host down with it — an
+            // unrecoverable crash that aborts the entire run, not a failing test. 10_000
+            // frames of Count + the Children iterator did exactly that. A few hundred is
+            // still orders of magnitude past this graph's acyclic depth, so it proves the
+            // same thing.
             Assert.Throws<InvalidOperationException>(
-                () => GuardlessMergedWalk.Count(window, budget: 10_000));
+                () => GuardlessMergedWalk.Count(window, budget: 200));
         });
     }
 
