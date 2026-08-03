@@ -639,9 +639,13 @@ something you can do for them from here:
    `KEINCHECK_REMOTE_FILE`). The label you pass as `target` becomes the `@host` in the
    client's id, so pick the machine's real name.
 
-A build can also enroll itself: the `Keincheck.Remote` package ships an MSBuild target that
-asks the local hub for a credential and embeds it, enabled with
-`<KeincheckRemoteEnroll>true</KeincheckRemoteEnroll>`.
+There are three ways to get a credential, and the hub issues all of them:
+   - ask for one directly (`hub_remote_issue`, the hub window, or
+     `Keincheck.Hub.exe --issue-credential`);
+   - let the build ask when none is available, with
+     `<KeincheckRemoteEnroll>true</KeincheckRemoteEnroll>`;
+   - or supply one you already have via `KeincheckRemoteCredentialFile` /
+     `KEINCHECK_REMOTE_FILE`, which is the CI route and always wins over the build asking.
 
 Finally the client needs a route to the hub. Either bind it somewhere reachable
 (`hub_remote_enable { "bindAddress": "192.168.1.50" }`, which needs an inbound firewall rule on

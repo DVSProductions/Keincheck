@@ -109,7 +109,6 @@ frameworks without style classes match nothing.
 | `Keincheck.Hub` | net10.0 | The broker daemon: pipe server, registry, launcher/restart, MCP proxy, tray (Velopack) |
 | `Keincheck.Connect` | net8.0 | The stdio shim an MCP client spawns |
 | `Keincheck.Remote` | net8.0 | **Opt-in** mutual-TLS transport for attaching apps on *other machines* — see [Remote](#remote) |
-| `Keincheck.Enroll` | net8.0 | `keincheck-enroll`, which asks the local hub for a remote credential |
 | `Keincheck` | net8.0 | Embedded all-in-one server (`UseMcpServer`) — Core + the Avalonia adapter |
 | `samples/Keincheck.Demo` | net10.0 | Demo Avalonia app wired as a client |
 | `tests/*` | net8.0 / net10.0 | xUnit + Avalonia.Headless |
@@ -165,19 +164,26 @@ explicitly enables it.
 **1. Turn on the listener** (hub tray ▸ *Remote access…*, or `hub_remote_enable`). The first
 time, this generates the hub's own certificate authority.
 
-**2. Issue a credential** for the machine that will connect. Three equivalent ways — the MCP
-tool, the hub window, or the CLI:
+**2. Issue a credential** for the machine that will connect. **The hub is the only thing that
+issues them** — it owns the certificate authority — and there are three ways to ask, which
+compose rather than compete.
+
+**(a) Just ask for one.** From the AI, the hub window, or a shell:
 
 ```
 hub_remote_issue { "target": "OP3R4T0RV2" }
 ```
 
 ```sh
-keincheck-enroll --target OP3R4T0RV2 --out cred.txt
+Keincheck.Hub.exe --issue-credential --target OP3R4T0RV2 --out cred.txt
 ```
 
 All three carry the same authorization — anything running as you — so none is privileged over
-the others. A build can do it automatically:
+the others. The command works whether or not a hub is running: it asks the running hub when
+there is one, and reads the store directly when there is not.
+
+**(b) Let the build ask, when nothing is available.** Opt in and the build calls the installed
+hub for you:
 
 ```xml
 <PropertyGroup>
@@ -185,6 +191,25 @@ the others. A build can do it automatically:
   <KeincheckRemoteTarget>OP3R4T0RV2</KeincheckRemoteTarget>
 </PropertyGroup>
 ```
+
+It writes to `obj/` (never the source tree), embeds the result as the
+`Keincheck.Remote.Credential` resource, reuses the existing one until it nears expiry, and
+**warns rather than failing** when there is no hub — a build machine without one must not break.
+
+**(c) Ask once yourself, then point the build at it.** The CI case: get a credential with (a),
+store it as a secret, and hand the build the path.
+
+```xml
+<PropertyGroup>
+  <KeincheckRemoteCredentialFile>$(CI_SECRET_PATH)</KeincheckRemoteCredentialFile>
+</PropertyGroup>
+```
+
+`KEINCHECK_REMOTE_FILE` works too. **(c) always wins over (b)** — if you supplied a credential
+the build will never quietly mint a different one — and a supplied path that does not exist is
+a hard error rather than a silent fallback.
+
+Never commit a credential. Build-issued ones default to 90 days, hand-issued to 365.
 
 **3. Point the app at the hub.** Install `Keincheck.Remote` and set the connector — see
 [`samples/Keincheck.Demo/Program.cs`](samples/Keincheck.Demo/Program.cs) for the real thing:

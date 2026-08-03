@@ -19,6 +19,12 @@ public static class Program
         // and the app exits cleanly during those transient runs.
         VelopackApp.Build().Run();
 
+        // Credential issuance is a one-shot command, not a hub run. It is handled BEFORE the
+        // single-instance election so it works while a hub is already up -- which is the
+        // normal case on a developer machine, and the case a build step hits.
+        if (args.Contains(Remote.CredentialCli.Verb, StringComparer.Ordinal))
+            return Remote.CredentialCli.Run(args);
+
         // Single-instance election: hold the per-user mutex for the hub's lifetime.
         using var mutex = new Mutex(initiallyOwned: true, PipeNames.SingleInstanceMutex, out var isFirst);
         if (!isFirst)

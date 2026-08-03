@@ -51,10 +51,17 @@
     The target is OFF unless a consuming project sets KeincheckRemoteEnroll=true, so merely
     installing this package never makes a build contact anything.
   -->
+  <!--
+    Ships the optional build-time credential resolution. It is OFF unless a consuming project
+    opts in, so merely installing this package never makes a build contact anything.
+
+    No tools/ payload: when the build does need a credential it calls the hub, which is already
+    installed and is the enrollment authority anyway. Shipping a separate executable to ask it
+    for one meant packaging, versioning and updating a second binary, and a second copy of the
+    pipe and framing code, for a single call.
+  -->
   <ItemGroup>
     <None Include="build\Keincheck.Remote.targets" Pack="true" PackagePath="build\" />
-    <None Include="$(MSBuildThisFileDirectory)..\Keincheck.Enroll\bin\$(Configuration)\net8.0\**\*"
-          Pack="true" PackagePath="tools\" Visible="false" Condition="Exists('$(MSBuildThisFileDirectory)..\Keincheck.Enroll\bin\$(Configuration)\net8.0')" />
   </ItemGroup>
 
 </Project>
