@@ -146,10 +146,14 @@ public sealed class RemoteLoopbackTests(HubRig rig, ITestOutputHelper output)
                     new Dictionary<string, object?> { ["clientId"] = previousActive }, cancellationToken: ct);
 
             // The durable trail the remote design promises, which nothing has ever checked.
+            // It lives beside the certificate authority that issued the credentials it records,
+            // rather than at the top of %APPDATA%\Keincheck — deriving it from the store's
+            // directory is also what stops the unit suite from pruning the developer's real one.
             var auditDir = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "Keincheck", "audit");
-            Assert.True(Directory.Exists(auditDir), "enabling remote access must install the audit sink.");
+                "Keincheck", "remote", "audit");
+            Assert.True(Directory.Exists(auditDir),
+                $"enabling remote access must install the audit sink at '{auditDir}'.");
             var auditFiles = Directory.GetFiles(auditDir, "*.jsonl");
             Assert.NotEmpty(auditFiles);
             foreach (var file in auditFiles)
