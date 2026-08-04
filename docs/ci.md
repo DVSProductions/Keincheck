@@ -17,6 +17,38 @@ covered by `pull_request`; use `workflow_dispatch` to run against a branch befor
 Both build workflows run on `windows-latest`. That is not a preference: `Keincheck.Wpf` is
 `net8.0-windows` with `UseWPF`, so `Keincheck.sln` cannot restore on Linux.
 
+## Cutting a release
+
+Bump `<Version>` in `Directory.Build.props`, merge, then push a semver tag. **Tag a commit
+that is already green** — the tag fires `release.yml` and `publish-nuget.yml` but *not* the
+test workflows, by design (see above), so nothing re-checks the commit at release time.
+
+```sh
+git tag v0.11.0
+git push origin v0.11.0
+```
+
+`release.yml` passes `-p:Version=` from the tag, so the tag is authoritative for the assembly
+version — not just the installer's name. Without it the tray, `hub_status` and the update check
+would report whatever `Directory.Build.props` happened to say.
+
+`publish-nuget.yml` packs seven library packages and pushes them via NuGet Trusted Publishing
+(GitHub OIDC — no stored API key). **NuGet versions are permanent**: a package can be unlisted
+but never deleted, so a bad tag burns that version number.
+
+To reproduce the Velopack packaging locally without burning a tag:
+
+```sh
+dotnet publish Keincheck.Hub/Keincheck.Hub.csproj -c Release -r win-x64 --self-contained true -o publish
+dotnet publish Keincheck.Connect/Keincheck.Connect.csproj -c Release -r win-x64 -o publish-shim
+cp publish-shim/keincheck-connect.exe publish/
+vpk pack -u Keincheck.Hub -v 0.11.0 -p publish -e Keincheck.Hub.exe --packTitle "Keincheck Hub"
+```
+
+That stops short of `vpk upload`, which is what the workflow does with its own token. Copying
+the shim into `publish/` is not optional — the hub's "Set up in Claude" points Claude at the
+co-located `keincheck-connect.exe`, and `e2e.yml` asserts it is there.
+
 ## What the E2E job actually does
 
 Every other test in this repository runs in-process against stub brokers and in-memory

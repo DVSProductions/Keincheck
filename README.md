@@ -73,29 +73,38 @@ Point any MCP-capable client at `http://127.0.0.1:3001`.
 
 ## Architecture (broker)
 
-```
-   AI client (Claude Code / Desktop)
-        │ stdio (MCP)
-   ┌────▼──────────────┐  ensures-up / launches
-   │ keincheck-connect │  (stdio shim)
-   └────┬──────────────┘
-        │ MCP over a named pipe
-   ┌────▼────────────────────────────────────────────┐
-   │ Keincheck.Hub  (Velopack daemon, tray)          │
-   │  • MCP server: meta-tools + proxy of active app │
-   │  • named-pipe broker  • registry + launcher     │
-   │  • audit log • per-app read-only toggle         │
-   └────┬────────────────────────┬───────────────────┘
-        │ named pipe             │ named pipe
-   ┌────▼──────────┐        ┌────▼──────────┐
-   │ Your app      │        │ Another app   │   apps embed an adapter pkg
-   │ +UseMcpClient │        │ +UseMcpClient │   (e.g. Keincheck.Avalonia)
-   └───────────────┘        └───────────────┘
+```mermaid
+flowchart TB
+    ai["AI client<br/>(Claude Code / Desktop)"]
+    shim["keincheck-connect<br/>stdio shim<br/>(ensures the hub is up)"]
+    hub["Keincheck.Hub — Velopack daemon, tray<br/>MCP server: meta-tools + proxy of the active app<br/>named-pipe broker · registry + launcher<br/>audit log · per-app read-only toggle"]
+    app1["Your app<br/>+ UseMcpClient"]
+    app2["Another app<br/>+ UseMcpClient"]
+    far["App on another machine<br/>+ Keincheck.Remote"]
+
+    ai -- "stdio (MCP)" --> shim
+    shim -- "MCP over a named pipe" --> hub
+    ai -. "MCP over loopback HTTP :3100" .-> hub
+
+    hub -- "named pipe" --> app1
+    hub -- "named pipe" --> app2
+    hub == "mutual TLS over TCP" ==> far
+
+    classDef remote stroke-dasharray: 4 3
+    class far remote
 ```
 
 Tools execute **inside each app** (where the UI toolkit lives, reached through that app's
 `IUiAdapter`); the hub is a framework-agnostic multiplexer that advertises the active
-client's tools and forwards calls over the pipe.
+client's tools and forwards calls to the owning client.
+
+**Two ways in.** The stdio shim is the usual one and the only one that can start a hub that
+is not running. The hub *also* serves MCP directly over loopback HTTP on **`127.0.0.1:3100`**,
+which is useful for a client that speaks HTTP natively or when you want to attach without
+spawning a shim. Both surfaces expose the same tools and share the same broker.
+
+Apps on other machines attach over [mutual TLS](#remote) and are addressed as
+`appid@host#n` — same tools, no separate code path.
 
 ## Tools
 
@@ -119,6 +128,17 @@ returns the whole workflow as a document the model can read before touching anyt
 
 Remote adds **no new tools for driving** — a remote app is addressed and driven exactly like a
 local one. The `hub_remote_*` tools only administer the listener and its credentials.
+
+**Static tooling mode.** Some agents ignore `notifications/tools/list_changed`, so client tools
+added when an app connects never appear for them. Start the hub with `--static-tools` (or
+`KEINCHECK_STATIC_TOOLS=1`) and the advertised list never changes: only the meta-tools are
+offered, and no list-changed notifications are sent. Discover a client's tools with
+`hub_list_client_tools` and invoke them through `hub_call_tool` instead:
+
+```jsonc
+hub_call_tool({ "tool": "query_controls", "args": { "selector": "Button" } })
+// "client" targets a specific client; omit it to use the active one.
+```
 
 **Addressing:** stable per-session handles (`ctl-1a`) plus a CSS-ish selector engine
 (`Button[Name=Save]`, `#Save`, `.toolGroup`, `Button.primary`, `StackPanel > TextBox`).
@@ -286,7 +306,8 @@ every attach, detach and authentication failure with its reason.
 | `Keincheck.Remote` | net8.0 | **Opt-in** mutual-TLS transport for attaching apps on *other machines* — see [Remote](#remote) |
 | `Keincheck` | net8.0 | Embedded all-in-one server (`UseMcpServer`) — Core + the Avalonia adapter |
 | `samples/Keincheck.Demo` | net10.0 | Demo Avalonia app wired as a client |
-| `tests/*` | net8.0 / net10.0 | xUnit + Avalonia.Headless |
+| `samples/Keincheck.Wpf.Demo` | net8.0-windows | The same demo surface on WPF, exercising the WPF adapter |
+| `tests/*` | net8.0 / net10.0 | xUnit + Avalonia.Headless, plus an out-of-process end-to-end suite — see [`docs/ci.md`](https://github.com/DVSProductions/Keincheck/blob/main/docs/ci.md) |
 
 The engine is **framework-free**: `Keincheck.Core` knows nothing about any UI toolkit and
 talks to the live UI only through the neutral `IUiAdapter` / `IUiDispatcher` seam. A new
@@ -304,34 +325,13 @@ dotnet build Keincheck.sln
 dotnet test  Keincheck.sln
 ```
 
-Every push and pull request runs that build and the full unit suite
-([`ci.yml`](https://github.com/DVSProductions/Keincheck/blob/main/.github/workflows/ci.yml)), plus an end-to-end job
-([`e2e.yml`](https://github.com/DVSProductions/Keincheck/blob/main/.github/workflows/e2e.yml)) that installs the hub from a real Velopack
-installer, launches the demo apps, and drives them through `keincheck-connect.exe` — the
-same path Claude takes. See [`docs/ci.md`](https://github.com/DVSProductions/Keincheck/blob/main/docs/ci.md) for what it covers and how to run it
-locally.
+Every push and pull request builds the solution and runs the unit suite, plus an end-to-end job
+that installs the hub from a real Velopack installer and drives it through
+`keincheck-connect.exe`. The end-to-end suite is **opt-in** — it drives a real hub, so it skips
+unless `KEINCHECK_E2E=1` and refuses to start if a hub is already running.
 
-The E2E suite lives in `tests/Keincheck.E2E` and is **opt-in**: it drives a real hub and
-rewrites `%APPDATA%\Keincheck`, so it skips unless `KEINCHECK_E2E=1`, and refuses to start
-if a hub is already running rather than hijacking yours.
-
-## Releasing
-
-Pushing a semver tag triggers the [release workflow](https://github.com/DVSProductions/Keincheck/blob/main/.github/workflows/release.yml), which
-publishes the Hub as a Velopack release on GitHub (installer + update + delta packages):
-
-```sh
-git tag v0.10.0
-git push origin v0.10.0
-```
-
-Locally, the same flow is:
-
-```sh
-dotnet publish Keincheck.Hub/Keincheck.Hub.csproj -c Release -r win-x64 --self-contained true -o publish
-vpk pack -u Keincheck.Hub -v 0.10.0 -p publish -e Keincheck.Hub.exe --packTitle "Keincheck Hub"
-vpk upload github --repoUrl https://github.com/DVSProductions/Keincheck --publish --releaseName "Keincheck Hub 0.10.0" --tag v0.10.0 --token <gh-token>
-```
+[`docs/ci.md`](https://github.com/DVSProductions/Keincheck/blob/main/docs/ci.md) covers the
+pipeline, how to run the end-to-end suite locally, and how releases are cut.
 
 ## Security
 
