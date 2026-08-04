@@ -4,10 +4,15 @@ Four workflows. Two make binaries, two check them.
 
 | Workflow | Trigger | What it proves |
 |---|---|---|
-| [`ci.yml`](../.github/workflows/ci.yml) | push, PR | The solution builds and all ~360 unit tests pass |
-| [`e2e.yml`](../.github/workflows/e2e.yml) | push, PR, dispatch | An **installed** hub really drives real apps |
+| [`ci.yml`](../.github/workflows/ci.yml) | main, PR, dispatch | The solution builds and the unit suite passes |
+| [`e2e.yml`](../.github/workflows/e2e.yml) | main, PR, dispatch | An **installed** hub really drives real apps |
 | [`release.yml`](../.github/workflows/release.yml) | `v*.*.*` tag | Velopack release on GitHub |
 | [`publish-nuget.yml`](../.github/workflows/publish-nuget.yml) | `v*.*.*` tag, dispatch | Library packages on NuGet.org |
+
+`push` is scoped to `main` on the two test workflows. An unscoped `push:` also matches
+pull-request branches *and* tag pushes, so every commit on an open PR ran twice and every
+release tag re-ran a 15-minute job for a commit that had already been tested. Branch work is
+covered by `pull_request`; use `workflow_dispatch` to run against a branch before opening one.
 
 Both build workflows run on `windows-latest`. That is not a preference: `Keincheck.Wpf` is
 `net8.0-windows` with `UseWPF`, so `Keincheck.sln` cannot restore on Linux.
@@ -107,19 +112,24 @@ VM, so this costs nothing. On a self-hosted runner, two concurrent E2E jobs woul
 over the mutex, port 3100 and `%APPDATA%\Keincheck` — the `concurrency` group in `e2e.yml`
 is there for that day.
 
-## The Session 0 question
+## The Session 0 question — settled
 
 GitHub-hosted Windows runners execute jobs in a non-interactive session with a virtual
-display and no `explorer.exe`. Avalonia windows are expected to create and render
-(software fallback, no GPU), but the hub's `TrayIcon` calls `Shell_NotifyIcon`, which wants
-a taskbar that is not there.
+display and no `explorer.exe`. The open question was whether the hub — an Avalonia `WinExe`
+whose `App` builds a `TrayIcon` via `Shell_NotifyIcon` — could run there at all. It matters
+more than it looks: `Program.Main`'s `finally` tears down the broker and the MCP servers if
+Avalonia throws, so a UI failure takes the pipe down with it.
 
-[`e2e-spike.yml`](../.github/workflows/e2e-spike.yml) exists to answer this and nothing
-else: install, start, probe over the MCP pipe, and — the part that matters — check the hub
-is **still alive afterwards**. `HubRuntime.Start` runs *before* Avalonia, so a hub can
-answer a full MCP round-trip and still be a corpse a second later. Delete that workflow
-once it has gone green once.
+**It works.** The E2E job runs green on `windows-latest`: the hub starts and stays up, a
+client attaches over the named pipe, `screenshot_window` and `screenshot_marked` return real
+PNGs, and the remote and cold-start legs pass. No tray workaround, no forced software
+rendering, no self-hosted runner needed.
 
-If it fails, in escalating cost: wrap `App.BuildTray` in a try/catch so a missing
-notification area cannot kill the daemon; force `Win32RenderingMode.Software`; or move the
-E2E to a self-hosted runner with a real logged-in session.
+If that ever regresses, the fallbacks in escalating cost are: wrap `App.BuildTray` in a
+try/catch so a missing notification area cannot kill the daemon; force
+`Win32RenderingMode.Software` in `BuildAvaloniaApp`; or move the E2E to a self-hosted runner
+with a logged-in session.
+
+Note that the harness asserts the hub is alive **after** the whole scenario, not merely that
+it answered once — `HubRuntime.Start` runs before Avalonia, so a dying hub can still serve a
+full MCP round-trip on its way out.

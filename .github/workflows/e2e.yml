@@ -13,8 +13,13 @@ name: E2E
 #   * a launched/restarted client keeps its id;
 #   * the packages restore and work in a consuming project.
 
+# push is scoped to main so a branch with an open PR is not built twice. An unscoped
+# `push:` also matches tag pushes, so cutting a release re-ran the whole 15-minute job
+# for a commit that had already been tested. Branch work is covered by pull_request;
+# use workflow_dispatch to run this against a branch before opening one.
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 

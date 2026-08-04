@@ -6,9 +6,14 @@ name: CI
 # none of them: release.yml and publish-nuget.yml both fire only on v*.*.* tags and
 # neither ever invokes dotnet build or dotnet test. A tag could ship a solution that
 # had not compiled since the last time someone built it locally.
+# push is scoped to main so a branch with an open PR is not built twice, and so a
+# release tag (which an unscoped `push:` also matches) does not re-run a commit that
+# has already been tested. Branch work is covered by pull_request.
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
