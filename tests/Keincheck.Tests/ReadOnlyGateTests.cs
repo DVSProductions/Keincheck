@@ -15,7 +15,7 @@ namespace Keincheck.Tests;
 /// side-effect-free tools whose names it did not recognise. That was survivable while
 /// read-only was a rarely-used opt-in toggle. It stops being survivable once remote clients
 /// default to read-only, because then the broken path is the <i>default</i> path: "just look
-/// at the suit" would fail on <c>describe_screen</c> and <c>wait_for_idle</c>.
+/// at the remote machine" would fail on <c>describe_screen</c> and <c>wait_for_idle</c>.
 /// </remarks>
 public sealed class ReadOnlyGateTests
 {

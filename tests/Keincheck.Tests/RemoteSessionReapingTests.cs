@@ -13,7 +13,7 @@ public sealed class RemoteSessionReapingTests
 {
     private static readonly TimeSpan Deadline = TimeSpan.FromMilliseconds(400);
 
-    private static ClientSessionContext Remote(string host = "OP3R4T0RV2") => new()
+    private static ClientSessionContext Remote(string host = "MACHINENAME") => new()
     {
         Transport = ClientTransport.Tcp,
         Host = host,
@@ -95,8 +95,8 @@ public sealed class RemoteSessionReapingTests
 
         await client.SendAsync(MessageKind.Register, new RegisterMessage
         {
-            ClientId = "protoface",
-            DisplayName = "protoface",
+            ClientId = "myapp",
+            DisplayName = "myapp",
             ProtocolVersion = ProtocolVersion.Current,
         });
         await connected.Task.WaitAsync(TimeSpan.FromSeconds(10));

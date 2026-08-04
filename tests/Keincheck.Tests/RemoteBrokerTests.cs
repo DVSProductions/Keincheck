@@ -18,7 +18,7 @@ public sealed class RemoteBrokerTests
     private static readonly ClientSessionContext RemoteContext = new()
     {
         Transport = ClientTransport.Tcp,
-        Host = "OP3R4T0RV2",
+        Host = "MACHINENAME",
         PeerAddress = "127.0.0.1",
         ReadOnlyDefault = true,
         CanLaunch = false,
@@ -83,11 +83,11 @@ public sealed class RemoteBrokerTests
     public async Task A_Remote_Client_Is_Filed_Under_AppId_At_Host()
     {
         await using var broker = NewBroker();
-        var (client, serve, cts, info) = await RegisterAsync(broker, "protoface", RemoteContext);
+        var (client, serve, cts, info) = await RegisterAsync(broker, "myapp", RemoteContext);
 
-        Assert.Equal("protoface@OP3R4T0RV2#1", info.ClientId);
-        Assert.Equal("protoface", info.AppId);
-        Assert.Equal("OP3R4T0RV2", info.Host);
+        Assert.Equal("myapp@MACHINENAME#1", info.ClientId);
+        Assert.Equal("myapp", info.AppId);
+        Assert.Equal("MACHINENAME", info.Host);
         Assert.Equal(ClientTransport.Tcp, info.Transport);
         Assert.True(info.IsRemote);
 
@@ -99,9 +99,9 @@ public sealed class RemoteBrokerTests
     {
         // The compatibility guarantee: a purely local setup must look exactly as it did.
         await using var broker = NewBroker();
-        var (client, serve, cts, info) = await RegisterAsync(broker, "protoface", ClientSessionContext.LocalPipe);
+        var (client, serve, cts, info) = await RegisterAsync(broker, "myapp", ClientSessionContext.LocalPipe);
 
-        Assert.Equal("protoface#1", info.ClientId);
+        Assert.Equal("myapp#1", info.ClientId);
         Assert.Null(info.Host);
         Assert.Equal(ClientTransport.Pipe, info.Transport);
         Assert.False(info.IsRemote);
@@ -113,15 +113,15 @@ public sealed class RemoteBrokerTests
     [Fact]
     public async Task Local_And_Remote_Instances_Of_One_App_Do_Not_Collide()
     {
-        // The motivating case from the design: two 'protoface' clients, one on the dev box and
-        // one on the suit. Sharing a suffix space would hand them the same hub id, and every
+        // The motivating case from the design: two 'myapp' clients, one on the dev box and
+        // one on the remote machine. Sharing a suffix space would hand them the same hub id, and every
         // tool call would go to whichever won the race.
         await using var broker = NewBroker();
-        var local = await RegisterAsync(broker, "protoface", ClientSessionContext.LocalPipe);
-        var remote = await RegisterAsync(broker, "protoface", RemoteContext);
+        var local = await RegisterAsync(broker, "myapp", ClientSessionContext.LocalPipe);
+        var remote = await RegisterAsync(broker, "myapp", RemoteContext);
 
-        Assert.Equal("protoface#1", local.Info.ClientId);
-        Assert.Equal("protoface@OP3R4T0RV2#1", remote.Info.ClientId);
+        Assert.Equal("myapp#1", local.Info.ClientId);
+        Assert.Equal("myapp@MACHINENAME#1", remote.Info.ClientId);
         Assert.Equal(2, broker.ListClients().Count);
 
         await Cleanup(local.Channel, local.Serve, local.Cts);
@@ -132,11 +132,11 @@ public sealed class RemoteBrokerTests
     public async Task Two_Remote_Clients_On_Different_Hosts_Are_Distinguishable()
     {
         await using var broker = NewBroker();
-        var a = await RegisterAsync(broker, "protoface", RemoteContext);
-        var b = await RegisterAsync(broker, "protoface", RemoteContext with { Host = "Ryzzen" });
+        var a = await RegisterAsync(broker, "myapp", RemoteContext);
+        var b = await RegisterAsync(broker, "myapp", RemoteContext with { Host = "OTHERMACHINE" });
 
-        Assert.Equal("protoface@OP3R4T0RV2#1", a.Info.ClientId);
-        Assert.Equal("protoface@Ryzzen#1", b.Info.ClientId);
+        Assert.Equal("myapp@MACHINENAME#1", a.Info.ClientId);
+        Assert.Equal("myapp@OTHERMACHINE#1", b.Info.ClientId);
 
         await Cleanup(a.Channel, a.Serve, a.Cts);
         await Cleanup(b.Channel, b.Serve, b.Cts);
@@ -146,11 +146,11 @@ public sealed class RemoteBrokerTests
     public async Task Two_Remote_Clients_On_The_Same_Host_Get_Distinct_Instance_Numbers()
     {
         await using var broker = NewBroker();
-        var a = await RegisterAsync(broker, "protoface", RemoteContext);
-        var b = await RegisterAsync(broker, "protoface", RemoteContext);
+        var a = await RegisterAsync(broker, "myapp", RemoteContext);
+        var b = await RegisterAsync(broker, "myapp", RemoteContext);
 
-        Assert.Equal("protoface@OP3R4T0RV2#1", a.Info.ClientId);
-        Assert.Equal("protoface@OP3R4T0RV2#2", b.Info.ClientId);
+        Assert.Equal("myapp@MACHINENAME#1", a.Info.ClientId);
+        Assert.Equal("myapp@MACHINENAME#2", b.Info.ClientId);
 
         await Cleanup(a.Channel, a.Serve, a.Cts);
         await Cleanup(b.Channel, b.Serve, b.Cts);
@@ -163,13 +163,13 @@ public sealed class RemoteBrokerTests
         // machine. A remote client that happens to report the same pid as a running local app
         // must not evict it and steal its hub id.
         await using var broker = NewBroker();
-        var local = await RegisterAsync(broker, "protoface", ClientSessionContext.LocalPipe, processId: 4242);
-        var remote = await RegisterAsync(broker, "protoface", RemoteContext, processId: 4242);
+        var local = await RegisterAsync(broker, "myapp", ClientSessionContext.LocalPipe, processId: 4242);
+        var remote = await RegisterAsync(broker, "myapp", RemoteContext, processId: 4242);
 
-        Assert.Equal("protoface#1", local.Info.ClientId);
-        Assert.Equal("protoface@OP3R4T0RV2#1", remote.Info.ClientId);
+        Assert.Equal("myapp#1", local.Info.ClientId);
+        Assert.Equal("myapp@MACHINENAME#1", remote.Info.ClientId);
         Assert.Equal(2, broker.ListClients().Count);
-        Assert.NotNull(broker.ClientStatus("protoface#1"));
+        Assert.NotNull(broker.ClientStatus("myapp#1"));
 
         await Cleanup(local.Channel, local.Serve, local.Cts);
         await Cleanup(remote.Channel, remote.Serve, remote.Cts);
@@ -181,7 +181,7 @@ public sealed class RemoteBrokerTests
     public async Task A_Remote_Client_Starts_ReadOnly()
     {
         await using var broker = NewBroker();
-        var (client, serve, cts, info) = await RegisterAsync(broker, "protoface", RemoteContext);
+        var (client, serve, cts, info) = await RegisterAsync(broker, "myapp", RemoteContext);
 
         Assert.True(info.ReadOnly);
         await Cleanup(client, serve, cts);
@@ -191,7 +191,7 @@ public sealed class RemoteBrokerTests
     public async Task Lifting_ReadOnly_On_A_Remote_Client_Is_Remembered_For_That_Machine()
     {
         // Remote starts read-only, but the operator's decision has to stick: on a link that
-        // drops as often as a wearable's, re-authorising after every blip made the permission
+        // drops as often as a mobile device's, re-authorising after every blip made the permission
         // meaningless in practice. It survives both a reconnect and a hub restart.
         var storePath = Path.Combine(Path.GetTempPath(), $"avmcp-remote-{Guid.NewGuid():N}.json");
         var options = new BrokerOptions
@@ -202,7 +202,7 @@ public sealed class RemoteBrokerTests
 
         await using (var broker = new PipeClientBroker(options, KnownClientStore.Open(storePath)))
         {
-            var session = await RegisterAsync(broker, "protoface", RemoteContext);
+            var session = await RegisterAsync(broker, "myapp", RemoteContext);
             Assert.True(session.Info.ReadOnly); // first contact is always read-only
 
             broker.SetReadOnly(session.Info.ClientId, false);
@@ -210,15 +210,15 @@ public sealed class RemoteBrokerTests
 
             // Persisted against the machine, NOT the bare app id.
             var persisted = KnownClientStore.Open(storePath);
-            Assert.False(persisted.Get("protoface@OP3R4T0RV2")!.ReadOnly);
-            Assert.Equal("OP3R4T0RV2", persisted.Get("protoface@OP3R4T0RV2")!.Host);
+            Assert.False(persisted.Get("myapp@MACHINENAME")!.ReadOnly);
+            Assert.Equal("MACHINENAME", persisted.Get("myapp@MACHINENAME")!.Host);
 
             await Cleanup(session.Channel, session.Serve, session.Cts);
         }
 
         // A brand-new hub process still honours it.
         await using var restarted = new PipeClientBroker(options, KnownClientStore.Open(storePath));
-        var reconnected = await RegisterAsync(restarted, "protoface", RemoteContext);
+        var reconnected = await RegisterAsync(restarted, "myapp", RemoteContext);
         Assert.False(reconnected.Info.ReadOnly);
         await Cleanup(reconnected.Channel, reconnected.Serve, reconnected.Cts);
     }
@@ -227,7 +227,7 @@ public sealed class RemoteBrokerTests
     public async Task Lifting_ReadOnly_On_A_Remote_Client_Does_Not_Touch_The_Local_One()
     {
         // The reason the decision is keyed on AppId@Host rather than the bare app id. Allowing
-        // yourself to drive the suit must not quietly make the copy of the same app running on
+        // yourself to drive the remote machine must not quietly make the copy of the same app running on
         // this desk writable as well -- they are different machines that happen to run the same
         // program, and the local one is the far more dangerous thing to hand over by accident.
         var storePath = Path.Combine(Path.GetTempPath(), $"avmcp-split-{Guid.NewGuid():N}.json");
@@ -235,8 +235,8 @@ public sealed class RemoteBrokerTests
             new BrokerOptions { WatchdogInterval = TimeSpan.FromHours(1) },
             KnownClientStore.Open(storePath));
 
-        var local = await RegisterAsync(broker, "protoface", ClientSessionContext.LocalPipe);
-        var remote = await RegisterAsync(broker, "protoface", RemoteContext);
+        var local = await RegisterAsync(broker, "myapp", ClientSessionContext.LocalPipe);
+        var remote = await RegisterAsync(broker, "myapp", RemoteContext);
 
         broker.SetReadOnly(local.Info.ClientId, true);      // lock the local one down
         broker.SetReadOnly(remote.Info.ClientId, false);    // and open the remote one
@@ -245,8 +245,8 @@ public sealed class RemoteBrokerTests
         Assert.False(broker.ClientStatus(remote.Info.ClientId)!.ReadOnly);
 
         var persisted = KnownClientStore.Open(storePath);
-        Assert.True(persisted.Get("protoface")!.ReadOnly);
-        Assert.False(persisted.Get("protoface@OP3R4T0RV2")!.ReadOnly);
+        Assert.True(persisted.Get("myapp")!.ReadOnly);
+        Assert.False(persisted.Get("myapp@MACHINENAME")!.ReadOnly);
 
         await Cleanup(local.Channel, local.Serve, local.Cts);
         await Cleanup(remote.Channel, remote.Serve, remote.Cts);
@@ -265,16 +265,16 @@ public sealed class RemoteBrokerTests
 
         await using (var broker = new PipeClientBroker(options, KnownClientStore.Open(storePath)))
         {
-            var session = await RegisterAsync(broker, "protoface", RemoteContext);
+            var session = await RegisterAsync(broker, "myapp", RemoteContext);
             await Cleanup(session.Channel, session.Serve, session.Cts);
         }
 
         await using var restarted = new PipeClientBroker(options, KnownClientStore.Open(storePath));
         var known = Assert.Single(restarted.ListKnownClients());
 
-        Assert.Equal("OP3R4T0RV2", known.Host);
+        Assert.Equal("MACHINENAME", known.Host);
         Assert.False(known.CanLaunch);
-        Assert.Equal("protoface", known.AppId);   // the bare id, not the composite key
+        Assert.Equal("myapp", known.AppId);   // the bare id, not the composite key
         Assert.Null(known.ExecutablePath);        // no local path was ever recorded for it
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
@@ -306,7 +306,7 @@ public sealed class RemoteBrokerTests
         // connect, then whatever attached first would receive the operator's calls -- their
         // arguments included -- and answer them.
         await using var broker = NewBroker();
-        var (client, serve, cts, info) = await RegisterAsync(broker, "protoface", RemoteContext);
+        var (client, serve, cts, info) = await RegisterAsync(broker, "myapp", RemoteContext);
 
         Assert.Null(broker.ActiveClientId);
 
@@ -324,7 +324,7 @@ public sealed class RemoteBrokerTests
         var local = await RegisterAsync(broker, "localapp", ClientSessionContext.LocalPipe);
         Assert.Equal(local.Info.ClientId, broker.ActiveClientId);
 
-        var remote = await RegisterAsync(broker, "protoface", RemoteContext);
+        var remote = await RegisterAsync(broker, "myapp", RemoteContext);
         Assert.Equal(local.Info.ClientId, broker.ActiveClientId);
 
         await Cleanup(local.Channel, local.Serve, local.Cts);
@@ -347,11 +347,11 @@ public sealed class RemoteBrokerTests
     public async Task Launching_A_Remote_Client_Is_Refused_And_Says_Where_It_Lives()
     {
         await using var broker = NewBroker();
-        var (client, serve, cts, info) = await RegisterAsync(broker, "protoface", RemoteContext);
+        var (client, serve, cts, info) = await RegisterAsync(broker, "myapp", RemoteContext);
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => broker.LaunchClientAsync(info.ClientId));
-        Assert.Contains("OP3R4T0RV2", ex.Message);
+        Assert.Contains("MACHINENAME", ex.Message);
         Assert.Contains("remote", ex.Message, StringComparison.OrdinalIgnoreCase);
 
         await Cleanup(client, serve, cts);
@@ -361,7 +361,7 @@ public sealed class RemoteBrokerTests
     public async Task Restarting_A_Remote_Client_Is_Refused()
     {
         await using var broker = NewBroker();
-        var (client, serve, cts, info) = await RegisterAsync(broker, "protoface", RemoteContext);
+        var (client, serve, cts, info) = await RegisterAsync(broker, "myapp", RemoteContext);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => broker.RestartClientAsync(info.ClientId));
         await Cleanup(client, serve, cts);
@@ -371,16 +371,16 @@ public sealed class RemoteBrokerTests
     public async Task Restarting_A_Remote_Client_Never_Starts_A_LOCAL_Copy_Instead()
     {
         // The worst failure this design can have, and the reason CanLaunch is a stored fact
-        // rather than something re-derived from the id. A LOCAL 'protoface' has a recorded
-        // executable path; 'protoface@OP3R4T0RV2#1' strips to 'protoface@OP3R4T0RV2', misses,
+        // rather than something re-derived from the id. A LOCAL 'myapp' has a recorded
+        // executable path; 'myapp@MACHINENAME#1' strips to 'myapp@MACHINENAME', misses,
         // and could otherwise fall back to that local profile -- starting a local app, and
-        // returning a process id, while the operator believes they restarted the suit.
+        // returning a process id, while the operator believes they restarted the remote machine.
         var storePath = Path.Combine(Path.GetTempPath(), $"avmcp-both-{Guid.NewGuid():N}.json");
         var store = KnownClientStore.Open(storePath);
         store.Upsert(new KnownClientProfile
         {
-            AppId = "protoface",
-            DisplayName = "protoface",
+            AppId = "myapp",
+            DisplayName = "myapp",
             // A real path -- if the guard were missing, this WOULD launch.
             ExecutablePath = Environment.ProcessPath ?? "C:\\Windows\\System32\\cmd.exe",
             LastSeenUtc = DateTimeOffset.UtcNow,
@@ -388,7 +388,7 @@ public sealed class RemoteBrokerTests
 
         await using var broker = new PipeClientBroker(
             new BrokerOptions { WatchdogInterval = TimeSpan.FromHours(1) }, store);
-        var (client, serve, cts, info) = await RegisterAsync(broker, "protoface", RemoteContext);
+        var (client, serve, cts, info) = await RegisterAsync(broker, "myapp", RemoteContext);
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
             () => broker.RestartClientAsync(info.ClientId));
@@ -407,9 +407,9 @@ public sealed class RemoteBrokerTests
         await using var broker = new PipeClientBroker(
             new BrokerOptions { WatchdogInterval = TimeSpan.FromHours(1) }, KnownClientStore.Open(storePath));
 
-        var (client, serve, cts, _) = await RegisterAsync(broker, "protoface", RemoteContext);
+        var (client, serve, cts, _) = await RegisterAsync(broker, "myapp", RemoteContext);
 
-        Assert.Null(KnownClientStore.Open(storePath).Get("protoface"));
+        Assert.Null(KnownClientStore.Open(storePath).Get("myapp"));
         await Cleanup(client, serve, cts);
     }
 
@@ -419,13 +419,13 @@ public sealed class RemoteBrokerTests
     public async Task WaitForClient_Matches_A_Remote_Client_By_App_Id_Or_App_At_Host()
     {
         await using var broker = NewBroker();
-        var (client, serve, cts, info) = await RegisterAsync(broker, "protoface", RemoteContext);
+        var (client, serve, cts, info) = await RegisterAsync(broker, "myapp", RemoteContext);
         var budget = TimeSpan.FromSeconds(5);
 
-        Assert.Equal(info.ClientId, (await broker.WaitForClientAsync("protoface", budget))!.ClientId);
-        Assert.Equal(info.ClientId, (await broker.WaitForClientAsync("protoface@OP3R4T0RV2", budget))!.ClientId);
+        Assert.Equal(info.ClientId, (await broker.WaitForClientAsync("myapp", budget))!.ClientId);
+        Assert.Equal(info.ClientId, (await broker.WaitForClientAsync("myapp@MACHINENAME", budget))!.ClientId);
         Assert.Equal(info.ClientId, (await broker.WaitForClientAsync(info.ClientId, budget))!.ClientId);
-        Assert.Null(await broker.WaitForClientAsync("protoface@Ryzzen", TimeSpan.FromMilliseconds(200)));
+        Assert.Null(await broker.WaitForClientAsync("myapp@OTHERMACHINE", TimeSpan.FromMilliseconds(200)));
 
         await Cleanup(client, serve, cts);
     }
@@ -434,15 +434,15 @@ public sealed class RemoteBrokerTests
     public async Task The_AppAtHost_Filter_Disambiguates_A_Local_From_A_Remote_Instance()
     {
         await using var broker = NewBroker();
-        var local = await RegisterAsync(broker, "protoface", ClientSessionContext.LocalPipe);
-        var remote = await RegisterAsync(broker, "protoface", RemoteContext);
+        var local = await RegisterAsync(broker, "myapp", ClientSessionContext.LocalPipe);
+        var remote = await RegisterAsync(broker, "myapp", RemoteContext);
         var budget = TimeSpan.FromSeconds(5);
 
         // The bare app id still matches SOMETHING -- which of the two is a coin toss, and that
         // is exactly why the app@host form exists.
-        Assert.NotNull(await broker.WaitForClientAsync("protoface", budget));
+        Assert.NotNull(await broker.WaitForClientAsync("myapp", budget));
         Assert.Equal(remote.Info.ClientId,
-            (await broker.WaitForClientAsync("protoface@OP3R4T0RV2", budget))!.ClientId);
+            (await broker.WaitForClientAsync("myapp@MACHINENAME", budget))!.ClientId);
 
         await Cleanup(local.Channel, local.Serve, local.Cts);
         await Cleanup(remote.Channel, remote.Serve, remote.Cts);
@@ -483,7 +483,7 @@ public sealed class RemoteBrokerTests
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         var serve = broker.AcceptChannel(brokerSide, ClientSessionContext.LocalPipe, cts.Token);
 
-        await client.SendAsync(MessageKind.EnrollRequest, new EnrollRequestMessage { TargetName = "suit" });
+        await client.SendAsync(MessageKind.EnrollRequest, new EnrollRequestMessage { TargetName = "remotehost" });
 
         var envelope = await client.ReceiveAsync(cts.Token);
         Assert.Equal(MessageKind.EnrollResponse, envelope!.Kind);
@@ -502,7 +502,7 @@ public sealed class RemoteBrokerTests
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
         var serve = broker.AcceptChannel(brokerSide, ClientSessionContext.LocalPipe, cts.Token);
 
-        await client.SendAsync(MessageKind.EnrollRequest, new EnrollRequestMessage { TargetName = "suit" });
+        await client.SendAsync(MessageKind.EnrollRequest, new EnrollRequestMessage { TargetName = "remotehost" });
 
         var response = (await client.ReceiveAsync(cts.Token))!.Unwrap<EnrollResponseMessage>()!;
         Assert.False(response.Accepted);

@@ -376,13 +376,13 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
         // The app id is entirely client-chosen and reaches the registry keys, the hub id, and
         // the wait-for filters, so it is sanitised rather than trusted. Two things this stops:
         // an id containing '@' or '#' can otherwise impersonate the `AppId@Host` disambiguator
-        // (a remote client registering as "protoface@OP3R4T0RV2" would be RETURNED by
+        // (a remote client registering as "myapp@MACHINENAME" would be RETURNED by
         // hub_wait_for_client for that filter, and the operator's calls would go to it); and an
         // unbounded id is a free way to bloat every dictionary that keys on it.
         var appId = SanitizeAppId(reg.ClientId);
 
         // The suffix space is keyed on the FULL identity, not the bare app id: a local
-        // 'protoface' and a remote 'protoface@OP3R4T0RV2' are different apps that both want
+        // 'myapp' and a remote 'myapp@MACHINENAME' are different apps that both want
         // slot #1, and sharing a key would hand them the same hub id.
         var identity = context.IsRemote && !string.IsNullOrEmpty(context.Host)
             ? $"{appId}@{context.Host}"
@@ -435,12 +435,12 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
                 (supersededStale?.ReadOnly ?? false)
                 || (_seen.TryGetValue(hubId, out var prior) && prior.ReadOnly);
 
-            // The persisted decision is keyed on the FULL identity, so the suit and the copy of
+            // The persisted decision is keyed on the FULL identity, so the remote machine and the copy of
             // the same app on this desk keep separate settings.
             var persisted = _store.Get(identity);
 
             // A remembered decision WINS over the transport's default — that is what makes
-            // "let me drive the suit" survive the wifi dropping out. Only a client the operator
+            // "let me drive the remote machine" survive the wifi dropping out. Only a client the operator
             // has never ruled on falls back to read-only-because-remote. (Note this reads the
             // persisted value directly rather than OR-ing it: an OR could never express
             // "explicitly allowed", which is the whole point.)
@@ -808,11 +808,11 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     /// <remarks>
     /// <para>
     /// This is the most important guard in the remote work, because the failure it prevents is
-    /// <i>silent and plausible</i>: <c>protoface@OP3R4T0RV2#1</c> strips to
-    /// <c>protoface@OP3R4T0RV2</c>, which misses in the launch-profile store and would then
-    /// fall back to a second lookup that could resolve the LOCAL <c>protoface</c> profile.
+    /// <i>silent and plausible</i>: <c>myapp@MACHINENAME#1</c> strips to
+    /// <c>myapp@MACHINENAME</c>, which misses in the launch-profile store and would then
+    /// fall back to a second lookup that could resolve the LOCAL <c>myapp</c> profile.
     /// The hub would start a local copy, report a process id, and the operator would believe
-    /// they had restarted the suit.
+    /// they had restarted the remote machine.
     /// </para>
     /// <para>
     /// It checks the recorded <see cref="ClientInfo.CanLaunch"/> — a fact established by the
@@ -829,11 +829,11 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
                 ? Snapshot_NoLock(live)
                 : _seen.GetValueOrDefault(clientId);
 
-            // An exact miss is NOT a free pass. `hub_launch_client { clientId: "protoface" }`
+            // An exact miss is NOT a free pass. `hub_launch_client { clientId: "myapp" }`
             // — the bare form the guide and the wait-filters actively encourage — matches
             // neither dictionary, so the guard used to fall straight through to
-            // ResolveProfile("protoface"), find the LOCAL launch profile, and start a local
-            // copy while the only connected 'protoface' was the remote one. That is precisely
+            // ResolveProfile("myapp"), find the LOCAL launch profile, and start a local
+            // copy while the only connected 'myapp' was the remote one. That is precisely
             // the silent-and-plausible failure this guard exists to prevent, reached by the
             // most natural spelling of the request. So an id that resolves ONLY to remote
             // clients is refused too.
@@ -977,12 +977,12 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
 
     /// <summary>
     /// Whether a client snapshot satisfies a wait filter. A null/empty filter matches any
-    /// connected client; otherwise the filter must equal the hub id (<c>protoface@SUIT#1</c>),
-    /// the bare app id (<c>protoface</c>), or the app-and-host (<c>protoface@SUIT</c>).
+    /// connected client; otherwise the filter must equal the hub id (<c>myapp@MACHINENAME#1</c>),
+    /// the bare app id (<c>myapp</c>), or the app-and-host (<c>myapp@MACHINENAME</c>).
     /// </summary>
     /// <remarks>
     /// The app-and-host form matters because the bare app id deliberately still matches a
-    /// remote client — <c>hub_wait_for_client { appId: "protoface" }</c> should find the suit —
+    /// remote client — <c>hub_wait_for_client { appId: "myapp" }</c> should find the remote machine —
     /// but with a local instance also running it would be a coin toss which one resolves.
     /// The middle form is how a caller says which they meant without pinning an instance number.
     /// </remarks>
@@ -1017,11 +1017,11 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     /// The setting is persisted against the client's full identity — the bare app id for a
     /// local app, <c>AppId@Host</c> for a remote one — so it survives both a reconnect and a
     /// hub restart. Keying on the full identity is what keeps the two separate: lifting
-    /// read-only on the suit must not quietly make the copy of the same app on this desk
+    /// read-only on the remote machine must not quietly make the copy of the same app on this desk
     /// writable, and vice versa.
     /// <para>
     /// Remote clients still <i>start</i> read-only; what is remembered is the operator's
-    /// decision once they have made one. On a link that drops as often as a wearable's, having
+    /// decision once they have made one. On a link that drops as often as a mobile device's, having
     /// to re-authorise after every blip made the permission meaningless in practice.
     /// </para>
     /// </remarks>
@@ -1184,7 +1184,7 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     /// </para>
     /// <list type="bullet">
     ///   <item><c>@</c> and <c>#</c> are structural in <c>AppId@Host#n</c>. A remote client
-    ///   registering as <c>protoface@OP3R4T0RV2</c> would have its <c>AppId</c> compare equal
+    ///   registering as <c>myapp@MACHINENAME</c> would have its <c>AppId</c> compare equal
     ///   to the app-and-host disambiguator, so <c>hub_wait_for_client</c> would hand the
     ///   operator that client instead of the real one — and subsequent tool calls, arguments
     ///   included, would go to it. The host half is unspoofable (it comes from the validated

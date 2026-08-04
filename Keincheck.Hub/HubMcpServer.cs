@@ -579,9 +579,9 @@ public sealed class HubMcpServer : IAsyncDisposable
         if (_options.QualifyToolNames)
         {
             // The LAST dot, not the first: a remote client id embeds a host name, which may
-            // itself contain dots (protoface@build.ci#1.get_logical_tree). Tool names never
+            // itself contain dots (myapp@build.ci#1.get_logical_tree). Tool names never
             // contain a dot, so splitting from the right is unambiguous where splitting from
-            // the left would truncate the client id to 'protoface@build'.
+            // the left would truncate the client id to 'myapp@build'.
             var dot = toolName.LastIndexOf('.');
             if (dot > 0)
                 return (toolName[..dot], args);

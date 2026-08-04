@@ -31,7 +31,7 @@ the Foundation agent — do not change these signatures unilaterally.
 | `McpHost`, `AppBuilderExtensions`                          | `Keincheck`       | **`Keincheck`** (unchanged) |
 
 The **public `UseMcpServer` API is unchanged** (still in namespace `Keincheck`),
-so the ProtoFace app that calls `.UseMcpServer()` still compiles untouched.
+so the MyApp app that calls `.UseMcpServer()` still compiles untouched.
 
 The 22 `[McpServerTool]` methods now live in the **Core assembly**, so
 `McpHost` discovers them via `WithToolsFromAssembly(typeof(InspectionTools).Assembly)`.
@@ -289,7 +289,7 @@ Selector grammar is unchanged from v1 (`Type`, `Type[Name=x]`, `#Name`, `[Prop=v
 namespace Keincheck;
 
 public static class AppBuilderExtensions {
-    // UNCHANGED public surface — ProtoFace's .UseMcpServer() still compiles.
+    // UNCHANGED public surface — MyApp's .UseMcpServer() still compiles.
     public static AppBuilder UseMcpServer(this AppBuilder builder,
                                           Action<McpServerOptions>? configure = null);
 }

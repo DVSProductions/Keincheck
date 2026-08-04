@@ -162,7 +162,7 @@ public static class StreamTransport
     /// </para>
     /// <para>
     /// Keepalive because a named pipe reports a dead peer immediately as EOF and TCP does not.
-    /// Without it, a suit that drives out of wifi range leaves the hub holding a socket that
+    /// Without it, a device that moves out of wifi range leaves the hub holding a socket that
     /// looks perfectly healthy until the application-level heartbeat watchdog notices. The
     /// keepalive gives the OS a chance to tear it down first.
     /// </para>

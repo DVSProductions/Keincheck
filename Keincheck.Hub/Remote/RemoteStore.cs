@@ -50,7 +50,7 @@ public sealed record RemoteSettings
     /// A non-loopback or wildcard bind is permitted: mutual TLS is what protects the hub, not
     /// the network boundary, and an exposed port that requires a hub-issued client certificate
     /// is genuinely low-risk. It stays an explicit choice all the same, because "reachable
-    /// from the convention AP" should never be something that happens by default.
+    /// from a public network" should never be something that happens by default.
     /// </remarks>
     public string BindAddress { get; init; } = "127.0.0.1";
 

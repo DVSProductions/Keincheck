@@ -15,7 +15,7 @@ public sealed class RemoteAuditFixTests
     private static readonly ClientSessionContext Remote = new()
     {
         Transport = ClientTransport.Tcp,
-        Host = "OP3R4T0RV2",
+        Host = "MACHINENAME",
         ReadOnlyDefault = true,
         CanLaunch = false,
     };
@@ -76,17 +76,17 @@ public sealed class RemoteAuditFixTests
     [Fact]
     public async Task A_Remote_Client_Keeps_Its_Id_Across_Reconnects()
     {
-        // The suffix was reserved under the composite key ("protoface@HOST") but released under
+        // The suffix was reserved under the composite key ("myapp@HOST") but released under
         // the bare app id, so the slot leaked and the id climbed #1, #2, #3... on every
-        // reconnect. On the motivating target -- a wearable on wifi -- that means the
+        // reconnect. On the motivating target -- a mobile device on wifi -- that means the
         // operator's hub_select_client breaks every time the link blips, and _seen grows
         // without bound over the months-long runtime this is designed for.
         await using var broker = NewBroker();
 
         for (var attempt = 1; attempt <= 4; attempt++)
         {
-            var session = await ConnectAsync(broker, "protoface", Remote);
-            Assert.Equal("protoface@OP3R4T0RV2#1", session.Info.ClientId);
+            var session = await ConnectAsync(broker, "myapp", Remote);
+            Assert.Equal("myapp@MACHINENAME#1", session.Info.ClientId);
             await session.DisposeAsync();
 
             // Wait for the disconnect to land before reconnecting.
@@ -104,23 +104,23 @@ public sealed class RemoteAuditFixTests
         // Releasing under the bare app id also removed slot 1 from an unrelated LOCAL app's
         // reservation set while that app was still live.
         await using var broker = NewBroker();
-        await using var local = await ConnectAsync(broker, "protoface", ClientSessionContext.LocalPipe);
-        Assert.Equal("protoface#1", local.Info.ClientId);
+        await using var local = await ConnectAsync(broker, "myapp", ClientSessionContext.LocalPipe);
+        Assert.Equal("myapp#1", local.Info.ClientId);
 
-        var remote = await ConnectAsync(broker, "protoface", Remote);
+        var remote = await ConnectAsync(broker, "myapp", Remote);
         await remote.DisposeAsync();
         for (var i = 0; i < 200 && broker.ListClients().Count > 1; i++)
             await Task.Delay(20);
 
         // A second local instance must still get #2, not collide on #1.
-        await using var second = await ConnectAsync(broker, "protoface", ClientSessionContext.LocalPipe);
-        Assert.Equal("protoface#2", second.Info.ClientId);
+        await using var second = await ConnectAsync(broker, "myapp", ClientSessionContext.LocalPipe);
+        Assert.Equal("myapp#2", second.Info.ClientId);
     }
 
     // ---------------------------------------------------------------- app id
 
     [Theory]
-    [InlineData("protoface@OP3R4T0RV2", "protoface_OP3R4T0RV2")]
+    [InlineData("myapp@MACHINENAME", "myapp_MACHINENAME")]
     [InlineData("evil#9", "evil_9")]
     [InlineData("has space", "has_space")]
     [InlineData("", "avalonia-app")]
@@ -142,22 +142,22 @@ public sealed class RemoteAuditFixTests
     public async Task A_Remote_Client_Cannot_Impersonate_The_AppAtHost_Disambiguator()
     {
         // The attack: a client holding a credential for host EVIL registers with the app id
-        // "protoface@OP3R4T0RV2". Matches() compares a wait-filter against AppId verbatim, so
-        // hub_wait_for_client { appId: "protoface@OP3R4T0RV2" } would have returned the
+        // "myapp@MACHINENAME". Matches() compares a wait-filter against AppId verbatim, so
+        // hub_wait_for_client { appId: "myapp@MACHINENAME" } would have returned the
         // impostor -- and the operator's subsequent tool calls, arguments included, with it.
         // The host half was never spoofable (it comes from the validated certificate); this is
         // the other half.
         await using var broker = NewBroker();
-        await using var real = await ConnectAsync(broker, "protoface", Remote);
+        await using var real = await ConnectAsync(broker, "myapp", Remote);
         await using var impostor = await ConnectAsync(
-            broker, "protoface@OP3R4T0RV2", Remote with { Host = "EVIL" });
+            broker, "myapp@MACHINENAME", Remote with { Host = "EVIL" });
 
-        Assert.Equal("protoface@OP3R4T0RV2#1", real.Info.ClientId);
-        Assert.DoesNotContain("@OP3R4T0RV2#", impostor.Info.AppId!);
+        Assert.Equal("myapp@MACHINENAME#1", real.Info.ClientId);
+        Assert.DoesNotContain("@MACHINENAME#", impostor.Info.AppId!);
 
-        var found = await broker.WaitForClientAsync("protoface@OP3R4T0RV2", TimeSpan.FromSeconds(5));
+        var found = await broker.WaitForClientAsync("myapp@MACHINENAME", TimeSpan.FromSeconds(5));
         Assert.Equal(real.Info.ClientId, found!.ClientId);
-        Assert.Equal("OP3R4T0RV2", found.Host);
+        Assert.Equal("MACHINENAME", found.Host);
     }
 
     // ---------------------------------------------------------------- registration
@@ -179,7 +179,7 @@ public sealed class RemoteAuditFixTests
             {
                 await client.SendAsync(MessageKind.Register, new RegisterMessage
                 {
-                    ClientId = "protoface", ProtocolVersion = ProtocolVersion.Current,
+                    ClientId = "myapp", ProtocolVersion = ProtocolVersion.Current,
                 }, cancellationToken: cts.Token);
             }
             catch { break; /* the hub tore the session down, which is the point */ }
@@ -201,23 +201,23 @@ public sealed class RemoteAuditFixTests
     {
         // The guard checked the exact hub id, so the bare form -- which the guide and the wait
         // filters actively encourage -- missed both dictionaries, fell through to the LOCAL
-        // launch profile, and started a local copy while the only connected 'protoface' was
+        // launch profile, and started a local copy while the only connected 'myapp' was
         // the remote one. Exactly the silent-and-plausible failure the guard exists to stop,
         // reached by the most natural spelling of the request.
         var storePath = Path.Combine(Path.GetTempPath(), $"kc-bare-{Guid.NewGuid():N}.json");
         var store = KnownClientStore.Open(storePath);
         store.Upsert(new KnownClientProfile
         {
-            AppId = "protoface",
+            AppId = "myapp",
             ExecutablePath = Environment.ProcessPath ?? "C:\\Windows\\System32\\cmd.exe",
             LastSeenUtc = DateTimeOffset.UtcNow,
         });
 
         await using var broker = NewBroker(store);
-        await using var remote = await ConnectAsync(broker, "protoface", Remote);
+        await using var remote = await ConnectAsync(broker, "myapp", Remote);
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => broker.LaunchClientAsync("protoface"));
+            () => broker.LaunchClientAsync("myapp"));
         Assert.Contains("cannot start or stop processes", ex.Message);
     }
 
@@ -230,27 +230,27 @@ public sealed class RemoteAuditFixTests
         var store = KnownClientStore.Open(storePath);
         store.Upsert(new KnownClientProfile
         {
-            AppId = "protoface", ExecutablePath = null, LastSeenUtc = DateTimeOffset.UtcNow,
+            AppId = "myapp", ExecutablePath = null, LastSeenUtc = DateTimeOffset.UtcNow,
         });
 
         await using var broker = NewBroker(store);
-        await using var local = await ConnectAsync(broker, "protoface", ClientSessionContext.LocalPipe);
-        await using var remote = await ConnectAsync(broker, "protoface", Remote);
+        await using var local = await ConnectAsync(broker, "myapp", ClientSessionContext.LocalPipe);
+        await using var remote = await ConnectAsync(broker, "myapp", Remote);
 
         // Reaches the profile lookup (and fails there for want of a path) rather than being
         // refused as remote.
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => broker.LaunchClientAsync("protoface"));
+            () => broker.LaunchClientAsync("myapp"));
         Assert.DoesNotContain("cannot start or stop processes", ex.Message);
     }
 
     [Theory]
-    [InlineData("protoface@OP3R4T0RV2")]
-    [InlineData("PROTOFACE@op3r4t0rv2")]
+    [InlineData("myapp@MACHINENAME")]
+    [InlineData("MYAPP@machinename")]
     public async Task Launching_By_The_AppId_At_Host_Spelling_Is_Refused_As_Remote(string spelling)
     {
         // The third spelling, and the one that skipped the guard entirely. The registry is keyed
-        // "protoface@OP3R4T0RV2#1", so this misses both dictionaries; and the fallback scan
+        // "myapp@MACHINENAME#1", so this misses both dictionaries; and the fallback scan
         // compared only the BARE app id, which this is not either. So `known` stayed null and
         // EnsureLaunchable returned without deciding anything.
         //
@@ -263,7 +263,7 @@ public sealed class RemoteAuditFixTests
         var store = KnownClientStore.Open(storePath);
 
         await using var broker = NewBroker(store);
-        await using var remote = await ConnectAsync(broker, "protoface", Remote);
+        await using var remote = await ConnectAsync(broker, "myapp", Remote);
 
         var launch = await Assert.ThrowsAsync<InvalidOperationException>(
             () => broker.LaunchClientAsync(spelling));
@@ -283,11 +283,11 @@ public sealed class RemoteAuditFixTests
         // right machine rather than merely refused.
         var storePath = Path.Combine(Path.GetTempPath(), $"kc-athost2-{Guid.NewGuid():N}.json");
         await using var broker = NewBroker(KnownClientStore.Open(storePath));
-        await using var remote = await ConnectAsync(broker, "protoface", Remote);
+        await using var remote = await ConnectAsync(broker, "myapp", Remote);
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => broker.LaunchClientAsync("protoface@OP3R4T0RV2"));
-        Assert.Contains("OP3R4T0RV2", ex.Message);
+            () => broker.LaunchClientAsync("myapp@MACHINENAME"));
+        Assert.Contains("MACHINENAME", ex.Message);
     }
 
     private sealed class Duplex(Stream read, Stream write) : Stream

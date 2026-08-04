@@ -17,7 +17,7 @@ public sealed record KnownClientProfile
     /// </summary>
     /// <remarks>
     /// Remote entries are keyed by app-and-host, never by the bare app id. A shared key would
-    /// make lifting read-only on the suit silently do the same to the copy running on this
+    /// make lifting read-only on the remote machine silently do the same to the copy running on this
     /// desk — the two are different machines that happen to run the same program.
     /// </remarks>
     public required string AppId { get; init; }

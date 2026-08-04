@@ -651,8 +651,8 @@ a headless box, a device on the bench — and **you drive them with exactly the 
 remote client is just a client that has a host:
 
 ```
-protoface#1                 <- local, on this machine
-protoface@OP3R4T0RV2#1      <- remote, on the machine labelled OP3R4T0RV2
+myapp#1                 <- local, on this machine
+myapp@MACHINENAME#1      <- remote, on the machine labelled MACHINENAME
 ```
 
 `hub_list_clients` shows `host`, `transport` (`pipe` or `tcp`), and `canLaunch` for each.
@@ -672,7 +672,7 @@ something you can do for them from here:
    ```csharp
    builder.UseMcpClient(o =>
    {
-       o.AppId = "protoface";
+       o.AppId = "myapp";
        o.Connector = RemoteChannelConnector.FromEnvironment();   // KEINCHECK_REMOTE[_FILE]
    });
    ```
@@ -684,7 +684,7 @@ something you can do for them from here:
    `samples/Keincheck.Demo/Program.cs` in the repo is a working example.
 
 3. **Give it a credential.** On the hub side: `hub_remote_enable`, then
-   `hub_remote_issue { "target": "OP3R4T0RV2" }`. Hand the returned bundle to that machine as
+   `hub_remote_issue { "target": "MACHINENAME" }`. Hand the returned bundle to that machine as
    the `KEINCHECK_REMOTE` environment variable (or write it to a file and set
    `KEINCHECK_REMOTE_FILE`). The label you pass as `target` becomes the `@host` in the
    client's id, so pick the machine's real name.
@@ -700,23 +700,23 @@ There are three ways to get a credential, and the hub issues all of them:
 Finally the client needs a route to the hub. Either bind it somewhere reachable
 (`hub_remote_enable { "bindAddress": "192.168.1.50" }`, which needs an inbound firewall rule on
 the hub machine), or forward a port and skip the firewall — the client always dials, so from
-the hub's machine: `ssh -R 7423:127.0.0.1:7423 OP3R4T0RV2`.
+the hub's machine: `ssh -R 7423:127.0.0.1:7423 MACHINENAME`.
 
 ### What is different about a remote client
 
 - **Read-only by default.** Inspection works immediately; mutating tools (`click_at`,
   `type_text`, `set_property`, ...) are refused until read-only is lifted. To drive a remote
-  app, call `hub_set_readonly { "clientId": "protoface@OP3R4T0RV2#1", "readOnly": false }`
+  app, call `hub_set_readonly { "clientId": "myapp@MACHINENAME#1", "readOnly": false }`
   first. The decision is remembered for that machine across reconnects and hub restarts, so
   you only do it once per target — and `hub_list_clients` shows the current state.
 - **Never auto-selected.** A local client can become active on its own; a remote one never
   does. Always `hub_select_client` explicitly.
 - **Cannot be launched or restarted.** `canLaunch` is false and `hub_launch_client` /
   `hub_restart_client` will refuse — the process is on another machine. When a remote client
-  drops, it reconnects on its own: use `hub_wait_for_client { "appId": "protoface@OP3R4T0RV2" }`
+  drops, it reconnects on its own: use `hub_wait_for_client { "appId": "myapp@MACHINENAME" }`
   rather than trying to restart it.
 - **Disambiguate by host.** With a local *and* a remote instance of the same app connected,
-  `{ "appId": "protoface" }` may match either. Use `protoface@OP3R4T0RV2` to be specific.
+  `{ "appId": "myapp" }` may match either. Use `myapp@MACHINENAME` to be specific.
 - `hub_list_client_tools { clientId? }` — list a client's tool descriptors (name,
   description, input schema) without relying on `tools/list_changed`.
 - `hub_call_tool { tool, args?, client? }` — call any client tool by name through the hub.
@@ -788,9 +788,9 @@ coordinates and is robust to layout shifts.
   blank. Unlock the session (or expect empty captures) before relying on vision.
 - **Read-only clients** refuse mutating tools; `hub_client_status` shows the flag. Remote
   clients start read-only, so this is the normal state there rather than an unusual one.
-- **Two clients with the same app id?** Check `host`. `protoface#1` and
-  `protoface@OP3R4T0RV2#1` are different machines running the same app, and a bare
-  `{ "appId": "protoface" }` filter may match either.
+- **Two clients with the same app id?** Check `host`. `myapp#1` and
+  `myapp@MACHINENAME#1` are different machines running the same app, and a bare
+  `{ "appId": "myapp" }` filter may match either.
 """;
 
     // ---- structured errors ------------------------------------------------
@@ -991,12 +991,12 @@ coordinates and is robust to layout shifts.
 
     public static JsonElement SetReadOnlySchema() =>
         JsonDocument.Parse(
-            """{"type":"object","properties":{"clientId":{"type":"string","description":"The hub-assigned client id (e.g. protoface@OP3R4T0RV2#1)."},"readOnly":{"type":"boolean","description":"true to refuse mutating tools, false to allow them."}},"required":["clientId","readOnly"]}""")
+            """{"type":"object","properties":{"clientId":{"type":"string","description":"The hub-assigned client id (e.g. myapp@MACHINENAME#1)."},"readOnly":{"type":"boolean","description":"true to refuse mutating tools, false to allow them."}},"required":["clientId","readOnly"]}""")
             .RootElement.Clone();
 
     public static JsonElement RemoteIssueSchema() =>
         JsonDocument.Parse(
-            """{"type":"object","properties":{"target":{"type":"string","description":"The machine label this credential authenticates as. Becomes the '@host' in that client's id (e.g. protoface@OP3R4T0RV2). Letters, digits, '.', '-' and '_' only."},"days":{"type":"integer","description":"Validity in days; the hub clamps it to its own maximum (365)."},"note":{"type":"string","description":"Recorded against the credential in hub_remote_status."},"outPath":{"type":"string","description":"Also write the bundle to this file, which is usually the easiest way to carry it to the other machine."}},"required":["target"]}""")
+            """{"type":"object","properties":{"target":{"type":"string","description":"The machine label this credential authenticates as. Becomes the '@host' in that client's id (e.g. myapp@MACHINENAME). Letters, digits, '.', '-' and '_' only."},"days":{"type":"integer","description":"Validity in days; the hub clamps it to its own maximum (365)."},"note":{"type":"string","description":"Recorded against the credential in hub_remote_status."},"outPath":{"type":"string","description":"Also write the bundle to this file, which is usually the easiest way to carry it to the other machine."}},"required":["target"]}""")
             .RootElement.Clone();
 
     public static JsonElement RemoteRevokeSchema() =>

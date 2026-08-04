@@ -23,8 +23,8 @@ toolkits plug in as adapter packages without touching the engine.
 > tools*. A remote client is just a client that happens to have a host:
 >
 > ```
-> protoface#1                 ← local
-> protoface@OP3R4T0RV2#1      ← the machine on the bench
+> myapp#1                 ← local
+> myapp@MACHINENAME#1      ← the machine on the bench
 > ```
 >
 > Mutually-authenticated TLS with a hub-owned certificate authority, read-only until you say
@@ -149,11 +149,11 @@ compose rather than compete.
 **(a) Just ask for one.** From the AI, the hub window, or a shell:
 
 ```
-hub_remote_issue { "target": "OP3R4T0RV2" }
+hub_remote_issue { "target": "MACHINENAME" }
 ```
 
 ```sh
-Keincheck.Hub.exe --issue-credential --target OP3R4T0RV2 --out cred.txt
+Keincheck.Hub.exe --issue-credential --target MACHINENAME --out cred.txt
 ```
 
 All three carry the same authorization — anything running as you — so none is privileged over
@@ -166,7 +166,7 @@ hub for you:
 ```xml
 <PropertyGroup>
   <KeincheckRemoteEnroll>true</KeincheckRemoteEnroll>
-  <KeincheckRemoteTarget>OP3R4T0RV2</KeincheckRemoteTarget>
+  <KeincheckRemoteTarget>MACHINENAME</KeincheckRemoteTarget>
 </PropertyGroup>
 ```
 
@@ -195,7 +195,7 @@ Never commit a credential. Build-issued ones default to 90 days, hand-issued to 
 ```csharp
 builder.UseMcpClient(o =>
 {
-    o.AppId = "protoface";
+    o.AppId = "myapp";
     o.Log = msg => Console.Error.WriteLine($"[keincheck] {msg}");
 
     // Returns null when neither KEINCHECK_REMOTE_FILE nor KEINCHECK_REMOTE is set, so the
@@ -225,10 +225,10 @@ New-NetFirewallRule -DisplayName "Keincheck Hub" -Direction Inbound `
 skip the firewall entirely. The client always dials, so a reverse forward works:
 
 ```sh
-ssh -R 7423:127.0.0.1:7423 OP3R4T0RV2      # from the hub machine
+ssh -R 7423:127.0.0.1:7423 MACHINENAME      # from the hub machine
 ```
 
-The client then appears as `protoface@OP3R4T0RV2#1` in `hub_list_clients` and is driven with
+The client then appears as `myapp@MACHINENAME#1` in `hub_list_clients` and is driven with
 exactly the same tools as a local app. **No new AI-facing tools for driving** — only
 `hub_remote_status` / `enable` / `disable` / `issue` / `revoke` to administer the listener, and
 `hub_set_readonly` to permit mutating tools (remote clients start read-only).
@@ -243,7 +243,7 @@ exactly the same tools as a local app. **No new AI-facing tools for driving** �
   always loopback through a tunnel anyway).
 - **Read-only by default.** Remote clients start read-only; `hub_set_readonly` (or the tray)
   permits mutating tools. The decision is remembered per machine, keyed on `AppId@Host`, so
-  allowing the suit cannot quietly allow a copy of the same app on your desk.
+  allowing the remote machine cannot quietly allow a copy of the same app on your desk.
 - **Never auto-selected.** Tool calls go to whichever client is active, so a remote client is
   never made active automatically — that would let whatever attached first receive your calls.
 - **Cannot be launched.** The hub refuses to launch or restart a remote client rather than

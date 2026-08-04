@@ -228,7 +228,7 @@ internal static class CredentialCli
         Options:
           --target <label>     Required. The machine this credential authenticates as. Letters,
                                digits, '.', '-' and '_' only; becomes the '@host' in that
-                               client's id (e.g. protoface@OP3R4T0RV2#1).
+                               client's id (e.g. myapp@MACHINENAME#1).
           --out <path>         Write the credential to a file instead of standard output.
           --days <n>           Requested validity; the hub clamps it to its own maximum.
           --note <text>        Recorded against the credential in hub_remote_status.

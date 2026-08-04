@@ -234,9 +234,9 @@ public sealed class V1ClientCompatibilityTests
 
     [Theory]
     [InlineData("demo")]
-    [InlineData("protoface")]
-    [InlineData("FanApp.WinBle")]
-    [InlineData("eev121gw")]
+    [InlineData("myapp")]
+    [InlineData("Acme.WinBle")]
+    [InlineData("probe123ab")]
     [InlineData("My-App_2")]
     [InlineData("Company.Product.Desktop")]
     public async Task Ordinary_App_Ids_Are_Not_Altered_By_The_New_Sanitiser(string appId)
@@ -291,28 +291,28 @@ public sealed class V1ClientCompatibilityTests
     public async Task A_v1_Client_Coexists_With_A_Remote_Client_Of_The_Same_App()
     {
         await using var broker = NewBroker();
-        await using var legacy = await ConnectV1Async(broker, "protoface");
+        await using var legacy = await ConnectV1Async(broker, "myapp");
 
         var (remoteClient, remoteBrokerSide) = DuplexPair();
         var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var serve = broker.AcceptChannel(remoteBrokerSide, new ClientSessionContext
         {
             Transport = ClientTransport.Tcp,
-            Host = "OP3R4T0RV2",
+            Host = "MACHINENAME",
             ReadOnlyDefault = true,
             CanLaunch = false,
         }, cts.Token);
         await remoteClient.SendAsync(MessageKind.Register, new RegisterMessage
         {
-            ClientId = "protoface", ProtocolVersion = ProtocolVersion.Current,
+            ClientId = "myapp", ProtocolVersion = ProtocolVersion.Current,
         });
 
-        var remote = await broker.WaitForClientAsync("protoface@OP3R4T0RV2", TimeSpan.FromSeconds(10));
-        Assert.Equal("protoface@OP3R4T0RV2#1", remote!.ClientId);
-        Assert.Equal("protoface#1", legacy.Info.ClientId);
+        var remote = await broker.WaitForClientAsync("myapp@MACHINENAME", TimeSpan.FromSeconds(10));
+        Assert.Equal("myapp@MACHINENAME#1", remote!.ClientId);
+        Assert.Equal("myapp#1", legacy.Info.ClientId);
 
         // The v1 client keeps active; a remote one never steals it.
-        Assert.Equal("protoface#1", broker.ActiveClientId);
+        Assert.Equal("myapp#1", broker.ActiveClientId);
 
         cts.Cancel();
         await remoteClient.DisposeAsync();

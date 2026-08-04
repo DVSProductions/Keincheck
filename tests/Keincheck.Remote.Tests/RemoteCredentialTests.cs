@@ -16,11 +16,11 @@ public sealed class RemoteCredentialTests
         using var pki = new TestPki();
         var endpoint = new RemoteEndpoint { Host = "hub.local", Port = 7423 };
 
-        var bundle = RemoteCredential.Serialize(pki.Client("OP3R4T0RV2"), pki.Ca, endpoint);
+        var bundle = RemoteCredential.Serialize(pki.Client("MACHINENAME"), pki.Ca, endpoint);
         using var credential = RemoteCredential.Parse(bundle);
 
         Assert.StartsWith(RemoteCredential.Prefix, bundle);
-        Assert.Equal("OP3R4T0RV2", credential.Host);
+        Assert.Equal("MACHINENAME", credential.Host);
         Assert.True(credential.ClientCertificate.HasPrivateKey, "the client must be able to authenticate");
         Assert.False(credential.CertificateAuthority.HasPrivateKey,
             "the CA's PRIVATE key must never leave the hub -- a client holding it could mint its own credentials");
@@ -65,7 +65,7 @@ public sealed class RemoteCredentialTests
         // It has to survive a C# string literal, a shell variable, and a URL unescaped --
         // those are the three ways it actually reaches an app.
         using var pki = new TestPki();
-        var bundle = RemoteCredential.Serialize(pki.Client("suit"), pki.Ca);
+        var bundle = RemoteCredential.Serialize(pki.Client("remotehost"), pki.Ca);
 
         Assert.DoesNotContain('+', bundle);
         Assert.DoesNotContain('/', bundle);
@@ -79,7 +79,7 @@ public sealed class RemoteCredentialTests
     public void A_Bundle_Without_An_Endpoint_Parses_And_Reports_None()
     {
         using var pki = new TestPki();
-        using var credential = RemoteCredential.Parse(RemoteCredential.Serialize(pki.Client("suit"), pki.Ca));
+        using var credential = RemoteCredential.Parse(RemoteCredential.Serialize(pki.Client("remotehost"), pki.Ca));
 
         Assert.Null(credential.DefaultEndpoint);
         // ...and a connector built from it must then insist on being told where to dial,
@@ -103,7 +103,7 @@ public sealed class RemoteCredentialTests
     public void A_Tampered_Bundle_Is_Refused()
     {
         using var pki = new TestPki();
-        var bundle = RemoteCredential.Serialize(pki.Client("suit"), pki.Ca);
+        var bundle = RemoteCredential.Serialize(pki.Client("remotehost"), pki.Ca);
 
         // Flip a character in the middle of the payload.
         var chars = bundle.ToCharArray();
@@ -117,7 +117,7 @@ public sealed class RemoteCredentialTests
     public void A_Bundle_Missing_Its_Prefix_Says_So_Plainly()
     {
         using var pki = new TestPki();
-        var bundle = RemoteCredential.Serialize(pki.Client("suit"), pki.Ca);
+        var bundle = RemoteCredential.Serialize(pki.Client("remotehost"), pki.Ca);
 
         var ex = Assert.Throws<FormatException>(() => RemoteCredential.Parse(bundle[RemoteCredential.Prefix.Length..]));
         Assert.Contains(RemoteCredential.Prefix, ex.Message);
@@ -129,7 +129,7 @@ public sealed class RemoteCredentialTests
         // A bundle with no private key would produce a credential that cannot authenticate,
         // failing later as an opaque TLS error instead of here as an obvious mistake.
         using var pki = new TestPki();
-        using var publicOnly = RemoteCertificates.LoadPublic(pki.Client("suit").Export(X509ContentType.Cert));
+        using var publicOnly = RemoteCertificates.LoadPublic(pki.Client("remotehost").Export(X509ContentType.Cert));
 
         Assert.Throws<ArgumentException>(() => RemoteCredential.Serialize(publicOnly, pki.Ca));
     }
@@ -138,7 +138,7 @@ public sealed class RemoteCredentialTests
     public void Expiry_Is_Reported_Before_It_Bites()
     {
         using var pki = new TestPki();
-        using var credential = pki.Credential("suit", lifetime: TimeSpan.FromDays(10));
+        using var credential = pki.Credential("remotehost", lifetime: TimeSpan.FromDays(10));
 
         Assert.False(credential.IsExpiringWithin(TimeSpan.FromDays(5)));
         Assert.True(credential.IsExpiringWithin(TimeSpan.FromDays(30)));
@@ -229,7 +229,7 @@ public sealed class RemoteCredentialTests
         // Not hygiene for its own sake: TLS on Windows refuses ephemeral keys, so each loaded
         // certificate holds a key container until disposal.
         using var pki = new TestPki();
-        var credential = RemoteCredential.Parse(RemoteCredential.Serialize(pki.Client("suit"), pki.Ca));
+        var credential = RemoteCredential.Parse(RemoteCredential.Serialize(pki.Client("remotehost"), pki.Ca));
 
         credential.Dispose();
         credential.Dispose(); // idempotent

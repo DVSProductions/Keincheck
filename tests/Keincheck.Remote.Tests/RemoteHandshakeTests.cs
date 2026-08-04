@@ -29,12 +29,12 @@ public sealed class RemoteHandshakeTests
         await using (client)
         await using (server)
         {
-            var serverTask = RemoteHandshake.ServerAsync(server, "OP3R4T0RV2", "9.9.9");
+            var serverTask = RemoteHandshake.ServerAsync(server, "MACHINENAME", "9.9.9");
             var clientResult = await RemoteHandshake.ClientAsync(client, "1.2.3");
             var serverResult = await serverTask;
 
             Assert.NotNull(serverResult);
-            Assert.Equal("OP3R4T0RV2", clientResult.Host);
+            Assert.Equal("MACHINENAME", clientResult.Host);
             Assert.Equal("9.9.9", clientResult.ServerVersion);
             Assert.True(clientResult.Compression);
             Assert.Contains(RemoteCapabilities.Brotli, clientResult.Capabilities);
@@ -52,7 +52,7 @@ public sealed class RemoteHandshakeTests
         {
             Assert.Equal(ChannelLimits.Handshake.MaxMessageSize, server.Limits.MaxMessageSize);
 
-            var serverTask = RemoteHandshake.ServerAsync(server, "suit", "9.9.9");
+            var serverTask = RemoteHandshake.ServerAsync(server, "remotehost", "9.9.9");
             await RemoteHandshake.ClientAsync(client, "1.2.3");
             await serverTask;
 
@@ -71,7 +71,7 @@ public sealed class RemoteHandshakeTests
         await using (client)
         await using (server)
         {
-            var serverTask = RemoteHandshake.ServerAsync(server, "suit", "9.9.9");
+            var serverTask = RemoteHandshake.ServerAsync(server, "remotehost", "9.9.9");
 
             await client.SendAsync(MessageKind.Hello, new HelloMessage
             {
@@ -96,7 +96,7 @@ public sealed class RemoteHandshakeTests
         await using (client)
         await using (server)
         {
-            var serverTask = RemoteHandshake.ServerAsync(server, "suit", "9.9.9");
+            var serverTask = RemoteHandshake.ServerAsync(server, "remotehost", "9.9.9");
             await client.SendAsync(MessageKind.Hello, new HelloMessage { ProtocolVersion = 9999 });
 
             Assert.Null(await serverTask);
@@ -117,7 +117,7 @@ public sealed class RemoteHandshakeTests
         await using (server)
         {
             var serverTask = RemoteHandshake.ServerAsync(
-                server, "suit", "9.9.9", vetoReason: RejectReason.Revoked, vetoDetail: "serial ABC was revoked");
+                server, "remotehost", "9.9.9", vetoReason: RejectReason.Revoked, vetoDetail: "serial ABC was revoked");
 
             var ex = await Assert.ThrowsAsync<RemoteHandshake.RejectedException>(
                 () => RemoteHandshake.ClientAsync(client, "1.2.3"));
@@ -184,7 +184,7 @@ public sealed class RemoteHandshakeTests
         await using (client)
         await using (server)
         {
-            var serverTask = RemoteHandshake.ServerAsync(server, "suit", "9.9.9");
+            var serverTask = RemoteHandshake.ServerAsync(server, "remotehost", "9.9.9");
             await client.SendAsync(MessageKind.EnrollRequest, new EnrollRequestMessage
             {
                 TargetName = "give-me-another", RequestedDays = 3650,
@@ -206,7 +206,7 @@ public sealed class RemoteHandshakeTests
         await using (client)
         await using (server)
         {
-            var serverTask = RemoteHandshake.ServerAsync(server, "suit", "9.9.9");
+            var serverTask = RemoteHandshake.ServerAsync(server, "remotehost", "9.9.9");
             await client.SendAsync(MessageKind.Register, new RegisterMessage { ClientId = "sneaky" });
 
             Assert.Null(await serverTask);
@@ -222,7 +222,7 @@ public sealed class RemoteHandshakeTests
         var (client, server) = DuplexPair();
         await using (server)
         {
-            var serverTask = RemoteHandshake.ServerAsync(server, "suit", "9.9.9");
+            var serverTask = RemoteHandshake.ServerAsync(server, "remotehost", "9.9.9");
             await client.DisposeAsync();
             Assert.Null(await serverTask);
         }
@@ -241,7 +241,7 @@ public sealed class RemoteHandshakeTests
             await server.ReceiveAsync();
             await server.SendAsync(MessageKind.Welcome, new WelcomeMessage
             {
-                ProtocolVersion = 9999, Host = "suit",
+                ProtocolVersion = 9999, Host = "remotehost",
             });
 
             await Assert.ThrowsAsync<ProtocolException>(() => clientTask);
@@ -258,7 +258,7 @@ public sealed class RemoteHandshakeTests
             var clientTask = RemoteHandshake.ClientAsync(client, "1.2.3");
 
             await server.ReceiveAsync();
-            await server.SendAsync(MessageKind.Heartbeat, new HeartbeatMessage { ClientId = "suit" });
+            await server.SendAsync(MessageKind.Heartbeat, new HeartbeatMessage { ClientId = "remotehost" });
 
             await Assert.ThrowsAsync<ProtocolException>(() => clientTask);
         }

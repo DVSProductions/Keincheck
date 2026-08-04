@@ -278,7 +278,7 @@ public sealed class HubWindow : Window
             Margin = new Thickness(16, 0, 6, 6),
         };
         ToolTip.SetTip(targetBox,
-            "Becomes the '@host' in that client's id, e.g. protoface@OP3R4T0RV2. "
+            "Becomes the '@host' in that client's id, e.g. myapp@MACHINENAME. "
             + "Letters, digits, '.', '-' and '_' only.");
 
         var issue = new Button { Content = "Issue credential", Margin = new Thickness(0, 0, 6, 6) };

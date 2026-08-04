@@ -78,13 +78,13 @@ public sealed class EkuPresenceTests
         // the client role has to keep working, or this is a self-inflicted outage rather than a
         // hardening.
         using var pki = new TestPki();
-        var client = pki.Client("OP3R4T0RV2");
+        var client = pki.Client("MACHINENAME");
 
         using var validated = RemoteTls.Validate(
             client, SslPolicyErrors.None, pki.Ca, RemoteCertificates.ClientAuthOid);
 
         Assert.NotNull(validated);
-        Assert.Equal("OP3R4T0RV2", RemoteCertificates.CommonNameOf(validated!));
+        Assert.Equal("MACHINENAME", RemoteCertificates.CommonNameOf(validated!));
     }
 
     [Fact]
@@ -93,7 +93,7 @@ public sealed class EkuPresenceTests
         // The pre-existing property, asserted here directly on the gate rather than through a
         // handshake, so a failure points at the check rather than at "TLS didn't connect".
         using var pki = new TestPki();
-        var client = pki.Client("OP3R4T0RV2");
+        var client = pki.Client("MACHINENAME");
 
         Assert.Null(RemoteTls.Validate(
             client, SslPolicyErrors.None, pki.Ca, RemoteCertificates.ServerAuthOid));

@@ -28,7 +28,7 @@
 > prove the guards hold, then revoke and disable. It also packs `Keincheck.Remote` and restores
 > it into a consumer project, asserting the MSBuild targets travelled inside the package.
 >
-> Manually, cross-machine against `OP3R4T0RV2` over `ssh -R`: attach, drive, read-only refusal,
+> Manually, cross-machine against `MACHINENAME` over `ssh -R`: attach, drive, read-only refusal,
 > revocation, three kill/reconnect cycles keeping the same id, a 28 KB base64 PNG screenshot,
 > clicking a real control, and a non-loopback LAN bind.
 >
@@ -47,22 +47,22 @@ default: zero-config, fast, and only the current user on the box can reach it.
 The consequence is that **the hub can only see apps running on its own machine.** The moment the
 app you want to inspect lives somewhere else, Keincheck can't reach it.
 
-This bites in practice. The ProtoFace suit runs headless on a laptop (`OP3R4T0RV2`). To drive its
-UI from the dev box I had to register an *interactive scheduled task* that ran a UIAutomation
-clicker in the console session — because the dev-box Keincheck tools connect to a dev-box hub over
-a pipe that can't cross machines. That worked, but it is a workaround for a capability Keincheck
-should own directly.
+This bites in practice. An app running headless on a second machine (`MACHINENAME`) cannot be
+driven from the dev box at all. The workaround is an *interactive scheduled task* running a
+UIAutomation clicker in that machine's console session — because the dev-box Keincheck tools
+connect to a dev-box hub over a pipe that cannot cross machines. That works, but it is a
+workaround for a capability Keincheck should own directly.
 
 **Remote closes that gap: introspect and drive an Avalonia app on another machine, from the AI
-session on your box, through the same tools you already use.**
+session on the operator's box, through the same tools already in use.**
 
 Motivating uses, concretely:
-- Drive the suit from the dev box — inject a WAV, read the face state, confirm a deploy landed —
-  with no session-1 UIA hack.
-- CI smoke test: after the pull-updater installs a build on the suit, attach and assert the app
+- Drive an app on a headless or embedded target from the dev box — feed it input, read its
+  state, confirm a deploy landed — with no session-1 UIA hack.
+- CI smoke test: after the pull-updater installs a build on the target, attach and assert the app
   came up (windows present, a control has the expected value) against the *live* remote build.
-- Field debugging: at a convention, attach to the suit over its own network and see what the HUD
-  and face are actually doing.
+- Field debugging: attach to a deployed device over its own network and see what its UI is
+  actually doing.
 
 ## 2. Goals & non-goals
 
@@ -72,11 +72,11 @@ Motivating uses, concretely:
 - **One surface.** A remote client shows up in the same `hub_list_clients` and is driven by the
   same tools. A remote client is just a client that happens to have a `Host`. No new AI-facing
   tools.
-- **Match the target's reality.** The suit moves, has no inbound route, and hosts its own AP. So
-  the design favours *client-dials-out*, tolerates reconnects, and can work "anywhere with
-  internet" — the same reasoning that made the CI updater a pull, not a push.
+- **Match the target's reality.** A deployed target may roam, may have no inbound route, and may
+  host its own network. So the design favours *client-dials-out*, tolerates reconnects, and can
+  work "anywhere with internet" — the same reasoning that made the CI updater a pull, not a push.
 - **Secure by construction.** Encrypted, mutually authenticated, **read-only by default** for
-  remote, consent-gated for mutation, audited, and never exposed on a public AP interface.
+  remote, consent-gated for mutation, audited, and never exposed on a public network interface.
 - **Additive.** The local pipe stays the zero-config default and the fast path. Remote is opt-in
   and changes nothing for existing local use.
 
@@ -109,9 +109,9 @@ events) is consumed by `HubMcpServer`; `PipeClientBroker` is just one implementa
 
 → New work: `RemoteClientBroker` + `CompositeClientBroker`; `HubMcpServer` untouched.
 
-**`ClientInfo` needs one concept added: location.** Two `protoface` clients (dev box + suit) must
+**`ClientInfo` needs one concept added: location.** Two `myapp` clients (dev box + remote machine) must
 be distinguishable. Add `Host` / `MachineId` and a `Transport` tag (`pipe` | `tcp` | `relay`); the
-hub id becomes `AppId@Host#n`, so the list reads `protoface@OP3R4T0RV2`. Either extend
+hub id becomes `AppId@Host#n`, so the list reads `myapp@MACHINENAME`. Either extend
 `RegisterMessage` with host/machine identity, or have the broker stamp it from the connection it
 accepted (preferred — the client can't spoof its own host).
 
@@ -122,7 +122,7 @@ Support two, because they answer different situations.
 **A. Direct dial-in** (same LAN, at the desk). The remote client opens a TLS socket to the hub's
 network listener, registers, and is driven. Simplest; works whenever the client can reach the hub.
 
-**B. Dial-out via rendezvous** (the field). The suit has no inbound route and roams. So both the
+**B. Dial-out via rendezvous** (the field). The remote machine has no inbound route and roams. So both the
 hub *and* the client make **outbound** TLS connections to a small, always-on **rendezvous** that
 pairs them by `AppId` + token and forwards bytes. NAT- and AP-proof, "anywhere with internet" —
 the exact shape as the updater's pull. Run the Keincheck session end-to-end *through* the relay so
@@ -132,21 +132,21 @@ the relay only ever sees ciphertext (it forwards frames; it does not terminate T
 
 **Phase 1 — transport zero: TCP over an SSH tunnel.** Before any new auth or network code: add the
 `StreamTransport` (framed protocol over a TCP loopback socket), then bridge with SSH
-port-forwarding. The suit is already SSH-key-reachable. `ssh -L 7000:127.0.0.1:7000` maps
-dev-box-localhost → suit-localhost; the hub dials the local end, the suit client speaks the same
+port-forwarding. The remote machine is already SSH-key-reachable. `ssh -L 7000:127.0.0.1:7000` maps
+dev-box-localhost → remote-localhost; the hub dials the local end, the remote machine client speaks the same
 framed protocol on its loopback end. **Zero new auth** (SSH keys are already the trust root),
 already encrypted, reachable only by someone holding the key. Ships this week, proves the
 stream-agnostic transport end to end, and remains a valid fallback forever. Remote clients default
 to **read-only**; mutation is an explicit opt-in.
 
 **Phase 2 — native remote.** TLS (`SslStream`) + token auth (reuse the updater's token pattern) so
-you don't need an SSH session open on the same LAN. Reconnect-with-backoff on the client (the suit's
+you don't need an SSH session open on the same LAN. Reconnect-with-backoff on the client (the remote machine's
 wifi flaps — the pattern already exists in `PipeTransport.ConnectAsync`). `Host`/`MachineId` in
 `ClientInfo`. UDP beacon discovery on-LAN (the companion link already beacons on `:8766`) so the hub
 auto-finds remote clients with no pinned address.
 
 **Phase 3 — anywhere.** The rendezvous relay (dial-out both sides), a consent + visibility surface
-(on the client / HUD: "a remote is attached", audit line on every mutating call — `HubAuditLog`
+(on the client UI: "a remote is attached", audit line on every mutating call — `HubAuditLog`
 already exists), a wearer/paw kill-switch, and a network-tuned screenshot codec (see §7).
 
 ## 6. Security model
@@ -157,36 +157,36 @@ already exists), a wearer/paw kill-switch, and a network-tuned screenshot codec 
   sessions are dropped), or mTLS with a small CA if we ever have many targets. Token first — it
   matches infra we already run.
 - **Never on the AP.** The remote listener / relay endpoint binds loopback (SSH model) or an
-  explicit private interface — **never** the suit's public convention AP. This is the same
+  explicit private interface — **never** a public network interface. This is the same
   discipline the companion server and the loopback-only llama sidecar already follow.
 - **Read-only by default for remote.** `ClientInfo.ReadOnly` already exists and the broker already
   refuses mutating tools for read-only clients. Remote clients start `ReadOnly = true`; "look at
-  the suit" is always safe, and "drive the suit" is a deliberate per-session escalation.
+  the remote machine" is always safe, and "drive the remote machine" is a deliberate per-session escalation.
 - **Consent & visibility.** The wearer must be able to see that someone is driving them — an
-  on-screen/HUD indicator and an audit line when a remote attaches and when a mutating call runs.
+  on-screen indicator and an audit line when a remote attaches and when a mutating call runs.
 - **Kill switch.** A client-side disconnect the wearer (or a paw button) can trigger.
 
 ## 7. Identity, discovery, robustness
 
-- **Identity.** `AppId@Host#n`; `ListClients` shows `protoface@OP3R4T0RV2` vs `protoface@Ryzzen`.
+- **Identity.** `AppId@Host#n`; `ListClients` shows `myapp@MACHINENAME` vs `myapp@OTHERMACHINE`.
   Host is stamped by the broker from the accepted connection, not self-reported.
 - **Discovery.** On-LAN: a UDP beacon (as the companion link already does) so the hub finds remote
   clients without a pinned address. In the field: the rendezvous is the directory (register by
   `AppId` + token).
 - **Reconnect.** Heartbeats already exist. Add backoff-reconnect + session resume (re-`Register`,
   re-send `ToolList`) on the client, and treat a transport drop as `ClientDown` → later
-  `ClientConnected` rather than a hard failure. A roaming suit should reappear on its own.
+  `ClientConnected` rather than a hard failure. A roaming client should reappear on its own.
 - **Screenshots.** Full BGRA frames are big; the local pipe can stay raw, but the network path
-  needs chunking + compression, and ideally region/diff frames. The suit's LED path already does
-  frame-diffing — worth borrowing that idea rather than shipping whole frames.
+  needs chunking + compression, and ideally region/diff frames. Frame-diffing is the standard
+  answer here — worth doing rather than shipping whole frames.
 
 ## 8. Test record/replay implications
 
 Recorded Keincheck tests target `AutomationId`s, so they are machine-agnostic. Remote makes two new
-things possible: **record a real interaction on the field suit and replay it in CI**, and **run an
+things possible: **record a real interaction on the field device and replay it in CI**, and **run an
 existing recorded test against a live remote build** as a post-deploy smoke check. That folds
-directly into the CI pull-updater: push → build → suit self-updates → hub attaches remotely →
-replay a smoke test → assert the face came up.
+directly into the CI pull-updater: push → build → the device self-updates → hub attaches remotely →
+replay a smoke test → assert the UI came up.
 
 ## 9. Open questions
 
@@ -205,7 +205,7 @@ replay a smoke test → assert the face came up.
 The transport is already a framed protocol over an arbitrary `Stream`, and the broker is already an
 interface. So "remote" is: a TLS/TCP transport beside the pipe, a `RemoteClientBroker` +
 `CompositeClientBroker` beside `PipeClientBroker`, a `Host` field on `ClientInfo`, and — for the
-roaming-suit case — a thin dial-out rendezvous. Ship it in three steps: SSH-tunnel MVP (this week,
+roaming-client case — a thin dial-out rendezvous. Ship it in three steps: SSH-tunnel MVP (this week,
 zero new trust), native TLS + token (no SSH session needed), then the rendezvous ("anywhere with
 internet"). Read-only by default, mutation opt-in, never on the AP, audited. The AI-facing tool
 surface does not change at all — a remote app is just a client with an address.

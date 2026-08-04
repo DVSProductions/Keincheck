@@ -35,7 +35,7 @@ public class EndToEndPipelineTests
         var env = MessageEnvelope.Wrap(MessageKind.Register, new RegisterMessage
         {
             ClientId = "proto-1",
-            DisplayName = "ProtoFace",
+            DisplayName = "MyApp",
             ProcessId = 4242,
             ProtocolVersion = ProtocolVersion.Current,
         }, correlationId: "h-1");
@@ -47,7 +47,7 @@ public class EndToEndPipelineTests
         var msg = back.Unwrap<RegisterMessage>();
         Assert.NotNull(msg);
         Assert.Equal("proto-1", msg!.ClientId);
-        Assert.Equal("ProtoFace", msg.DisplayName);
+        Assert.Equal("MyApp", msg.DisplayName);
         Assert.Equal(4242, msg.ProcessId);
         Assert.True(ProtocolVersion.IsCompatible(msg.ProtocolVersion));
     }

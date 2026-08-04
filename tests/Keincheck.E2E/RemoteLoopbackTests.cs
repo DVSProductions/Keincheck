@@ -122,7 +122,7 @@ public sealed class RemoteLoopbackTests(HubRig rig, ITestOutputHelper output)
             Assert.Contains("read-only", refused, StringComparison.OrdinalIgnoreCase);
 
             // Described in the source as the most important guard in the remote work: without
-            // it, "restart the app on the suit" silently launches a LOCAL copy instead.
+            // it, "restart the app on the remote machine" silently launches a LOCAL copy instead.
             var launchRefused = McpJson.Refused(await mcp.CallToolAsync("hub_launch_client",
                 new Dictionary<string, object?> { ["clientId"] = remoteId }, cancellationToken: ct));
             output.WriteLine($"launch refused for a remote client: {launchRefused}");

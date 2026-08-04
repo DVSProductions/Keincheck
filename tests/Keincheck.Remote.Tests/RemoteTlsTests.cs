@@ -72,20 +72,20 @@ public sealed class RemoteTlsTests
     public async Task Enrolled_Client_Connects_And_The_Hub_Learns_Its_Host_From_The_Certificate()
     {
         using var pki = new TestPki();
-        using var credential = pki.Credential("OP3R4T0RV2");
+        using var credential = pki.Credential("MACHINENAME");
 
         var host = await ConnectAsync(pki.Server, pki.Ca, credential);
 
         // The host is NOT self-reported: it is the CN of the certificate the hub validated.
-        // This is what makes `protoface@OP3R4T0RV2` trustworthy, and it is why stamping the
+        // This is what makes `myapp@MACHINENAME` trustworthy, and it is why stamping the
         // host from the socket address would not work -- over a tunnel that is always loopback.
-        Assert.Equal("OP3R4T0RV2", host);
-        Assert.Equal("OP3R4T0RV2", credential.Host);
+        Assert.Equal("MACHINENAME", host);
+        Assert.Equal("MACHINENAME", credential.Host);
     }
 
     [Theory]
-    [InlineData("OP3R4T0RV2")]
-    [InlineData("suit-01")]
+    [InlineData("MACHINENAME")]
+    [InlineData("host-01")]
     [InlineData("build.ci_02")]
     public async Task Ordinary_Host_Labels_Round_Trip_Intact(string label)
     {
@@ -97,12 +97,12 @@ public sealed class RemoteTlsTests
 
     [Theory]
     // Directory-name injection: ',' and '=' are structural in an X.500 subject.
-    [InlineData("suit-01, OU=admin")]
+    [InlineData("host-01, OU=admin")]
     [InlineData("a=b")]
     // These would corrupt the hub's own AppId@Host#n identifier scheme -- and the code they
     // confuse is what decides whether an id may be launched as a LOCAL process.
-    [InlineData("suit@evil")]
-    [InlineData("suit#2")]
+    [InlineData("host@evil")]
+    [InlineData("host#2")]
     // Whitespace, control characters, and absurd lengths.
     [InlineData("has space")]
     [InlineData("nul\0byte")]
@@ -131,7 +131,7 @@ public sealed class RemoteTlsTests
     {
         using var real = new TestPki("Real Hub CA");
         using var attacker = new TestPki("Attacker CA");
-        using var forged = attacker.Credential("OP3R4T0RV2");
+        using var forged = attacker.Credential("MACHINENAME");
 
         // Same CN, different issuer. Only the signature matters.
         await Assert.ThrowsAnyAsync<Exception>(() => ConnectAsync(real.Server, real.Ca, forged));
@@ -144,7 +144,7 @@ public sealed class RemoteTlsTests
         // trees, so a client that could be lured to an impostor would hand over its screen.
         using var real = new TestPki("Real Hub CA");
         using var impostor = new TestPki("Impostor CA");
-        using var credential = real.Credential("OP3R4T0RV2");
+        using var credential = real.Credential("MACHINENAME");
 
         await Assert.ThrowsAnyAsync<Exception>(
             () => ConnectAsync(impostor.Server, impostor.Ca, credential));
@@ -226,13 +226,13 @@ public sealed class RemoteTlsTests
         // The positive control: without this, every rejection test above could be passing
         // because the gate rejects everything.
         using var pki = new TestPki();
-        var client = pki.Client("OP3R4T0RV2");
+        var client = pki.Client("MACHINENAME");
 
         using var accepted = RemoteTls.Validate(
             client, System.Net.Security.SslPolicyErrors.None, pki.Ca, RemoteCertificates.ClientAuthOid);
 
         Assert.NotNull(accepted);
-        Assert.Equal("OP3R4T0RV2", RemoteCertificates.CommonNameOf(accepted!));
+        Assert.Equal("MACHINENAME", RemoteCertificates.CommonNameOf(accepted!));
     }
 
     [Fact]

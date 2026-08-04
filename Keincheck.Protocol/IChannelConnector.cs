@@ -118,7 +118,7 @@ public sealed class ChannelSession
     /// <remarks>
     /// The local pipe wants <c>null</c>: a dead peer surfaces immediately as EOF, so an
     /// idle-read timeout would only add false positives. TCP has no such courtesy — a
-    /// black-holed connection (the suit's wifi drops mid-session) looks exactly like a quiet
+    /// black-holed connection (the remote machine's wifi drops mid-session) looks exactly like a quiet
     /// one, and without a deadline the client would wait forever on a socket that is never
     /// going to answer.
     /// </remarks>

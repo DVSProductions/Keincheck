@@ -32,7 +32,7 @@ public sealed class RemoteHardeningTests : IDisposable
             sink.Write(new AuditEntry
             {
                 TimestampUtc = DateTimeOffset.UtcNow,
-                ClientId = "protoface@OP3R4T0RV2#1",
+                ClientId = "myapp@MACHINENAME#1",
                 ToolName = new string('x', 200),
                 Outcome = AuditOutcome.Ok,
                 Kind = AuditKind.Invoke,

@@ -13,7 +13,7 @@ namespace Keincheck.Remote;
 /// <code>
 /// builder.UseMcpClient(o =>
 /// {
-///     o.AppId = "protoface";
+///     o.AppId = "myapp";
 ///     o.Connector = RemoteChannelConnector.FromEnvironment()          // KEINCHECK_REMOTE[_FILE]
 ///                   ?? RemoteChannelConnector.FromBundle(BakedCredential);
 /// });

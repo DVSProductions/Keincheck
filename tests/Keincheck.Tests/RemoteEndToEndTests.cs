@@ -140,15 +140,15 @@ public sealed class RemoteEndToEndTests : IDisposable
     public async Task A_Remote_App_Attaches_And_Is_Driven_Through_The_Same_Tools_As_A_Local_One()
     {
         await using var rig = await StartHubAsync();
-        var (bundle, record) = rig.Remote.Issue("OP3R4T0RV2");
+        var (bundle, record) = rig.Remote.Issue("MACHINENAME");
         using var credential = RemoteCredential.Parse(bundle);
-        await using var client = await ConnectAsync(rig, credential, "protoface");
+        await using var client = await ConnectAsync(rig, credential, "myapp");
 
-        var info = await WaitForClientAsync(rig.Broker, "protoface@OP3R4T0RV2");
+        var info = await WaitForClientAsync(rig.Broker, "myapp@MACHINENAME");
 
         // The identity is derived from the certificate, so it is trustworthy.
-        Assert.Equal("protoface@OP3R4T0RV2#1", info.ClientId);
-        Assert.Equal("OP3R4T0RV2", info.Host);
+        Assert.Equal("myapp@MACHINENAME#1", info.ClientId);
+        Assert.Equal("MACHINENAME", info.Host);
         Assert.Equal(ClientTransport.Tcp, info.Transport);
         Assert.Equal(record.Host, info.Host);
 
@@ -177,14 +177,14 @@ public sealed class RemoteEndToEndTests : IDisposable
     public async Task The_Audit_Trail_Records_The_Attachment_And_Reaches_Disk()
     {
         await using var rig = await StartHubAsync();
-        var (bundle, _) = rig.Remote.Issue("OP3R4T0RV2");
+        var (bundle, _) = rig.Remote.Issue("MACHINENAME");
         using var credential = RemoteCredential.Parse(bundle);
-        await using var client = await ConnectAsync(rig, credential, "protoface");
-        await WaitForClientAsync(rig.Broker, "protoface@OP3R4T0RV2");
+        await using var client = await ConnectAsync(rig, credential, "myapp");
+        await WaitForClientAsync(rig.Broker, "myapp@MACHINENAME");
 
         var entries = rig.Audit.Snapshot();
-        Assert.Contains(entries, e => e.Kind == AuditKind.Enroll && e.Host == "OP3R4T0RV2");
-        Assert.Contains(entries, e => e.Kind == AuditKind.Attach && e.Host == "OP3R4T0RV2");
+        Assert.Contains(entries, e => e.Kind == AuditKind.Enroll && e.Host == "MACHINENAME");
+        Assert.Contains(entries, e => e.Kind == AuditKind.Attach && e.Host == "MACHINENAME");
         Assert.Contains(entries, e => e.Kind == AuditKind.RemoteToggled);
 
         // Enabling remote installs the durable sink -- a 500-entry ring is not an audit trail
@@ -202,10 +202,10 @@ public sealed class RemoteEndToEndTests : IDisposable
         // Someone else's hub, with its own CA. Same host label, so only the signature differs.
         using var otherStore = RemoteStore.Open(Path.Combine(_dir, "other-hub"));
         otherStore.Provision();
-        var (foreignBundle, _) = otherStore.Issue("OP3R4T0RV2", TimeSpan.FromDays(1), "test");
+        var (foreignBundle, _) = otherStore.Issue("MACHINENAME", TimeSpan.FromDays(1), "test");
         using var foreign = RemoteCredential.Parse(foreignBundle);
 
-        await Assert.ThrowsAnyAsync<Exception>(() => ConnectAsync(rig, foreign, "protoface"));
+        await Assert.ThrowsAnyAsync<Exception>(() => ConnectAsync(rig, foreign, "myapp"));
         Assert.Empty(rig.Broker.ListClients());
     }
 
@@ -213,12 +213,12 @@ public sealed class RemoteEndToEndTests : IDisposable
     public async Task A_Revoked_Credential_Is_Refused_With_A_Reason()
     {
         await using var rig = await StartHubAsync();
-        var (bundle, record) = rig.Remote.Issue("OP3R4T0RV2");
+        var (bundle, record) = rig.Remote.Issue("MACHINENAME");
         using var credential = RemoteCredential.Parse(bundle);
 
         // It works first...
-        await using (var _ = await ConnectAsync(rig, credential, "protoface"))
-            await WaitForClientAsync(rig.Broker, "protoface@OP3R4T0RV2");
+        await using (var _ = await ConnectAsync(rig, credential, "myapp"))
+            await WaitForClientAsync(rig.Broker, "myapp@MACHINENAME");
 
         Assert.True(rig.Remote.Revoke(record.Serial));
 
@@ -226,7 +226,7 @@ public sealed class RemoteEndToEndTests : IDisposable
         // it is the hub's own list that refuses it, which is what makes a leaked build
         // credential recoverable rather than permanent.
         var ex = await Assert.ThrowsAsync<RemoteHandshake.RejectedException>(
-            () => ConnectAsync(rig, credential, "protoface"));
+            () => ConnectAsync(rig, credential, "myapp"));
         Assert.Equal(RejectReason.Revoked, ex.Code);
         Assert.False(ex.IsRetryable);
     }
@@ -235,13 +235,13 @@ public sealed class RemoteEndToEndTests : IDisposable
     public async Task Disabling_Remote_Access_Stops_New_Connections()
     {
         await using var rig = await StartHubAsync();
-        var (bundle, _) = rig.Remote.Issue("OP3R4T0RV2");
+        var (bundle, _) = rig.Remote.Issue("MACHINENAME");
         using var credential = RemoteCredential.Parse(bundle);
 
         await rig.Remote.DisableAsync();
         Assert.False(rig.Remote.IsListening);
 
-        await Assert.ThrowsAnyAsync<Exception>(() => ConnectAsync(rig, credential, "protoface"));
+        await Assert.ThrowsAnyAsync<Exception>(() => ConnectAsync(rig, credential, "myapp"));
     }
 
     [Fact]
@@ -250,7 +250,7 @@ public sealed class RemoteEndToEndTests : IDisposable
         // Belt and braces against the worst escalation: a remote peer minting more credentials
         // would turn one leaked build certificate into an unbounded, self-renewing grant.
         await using var rig = await StartHubAsync();
-        var (bundle, _) = rig.Remote.Issue("OP3R4T0RV2");
+        var (bundle, _) = rig.Remote.Issue("MACHINENAME");
         using var credential = RemoteCredential.Parse(bundle);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
@@ -277,7 +277,7 @@ public sealed class RemoteEndToEndTests : IDisposable
         // yet-welcomed peer cannot drive a 32 MiB reassembly. The important half of the
         // assertion is the second one: the hub is still fine afterwards.
         await using var rig = await StartHubAsync();
-        var (bundle, _) = rig.Remote.Issue("OP3R4T0RV2");
+        var (bundle, _) = rig.Remote.Issue("MACHINENAME");
         using var credential = RemoteCredential.Parse(bundle);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
@@ -307,9 +307,9 @@ public sealed class RemoteEndToEndTests : IDisposable
         }
 
         // The point of the test: the hub is unharmed and still serving.
-        await using var good = await ConnectAsync(rig, credential, "protoface");
-        var info = await WaitForClientAsync(rig.Broker, "protoface@OP3R4T0RV2");
-        Assert.Equal("OP3R4T0RV2", info.Host);
+        await using var good = await ConnectAsync(rig, credential, "myapp");
+        var info = await WaitForClientAsync(rig.Broker, "myapp@MACHINENAME");
+        Assert.Equal("MACHINENAME", info.Host);
         Assert.Contains(rig.Audit.Snapshot(), e => e.Kind == AuditKind.AuthFailure);
     }
 
@@ -331,8 +331,8 @@ public sealed class RemoteEndToEndTests : IDisposable
                 var (bundle, _) = rig.Remote.Issue($"host-{i:00}");
                 var credential = RemoteCredential.Parse(bundle);
                 credentials.Add(credential);
-                clients.Add(await ConnectAsync(rig, credential, "protoface"));
-                await WaitForClientAsync(rig.Broker, $"protoface@host-{i:00}");
+                clients.Add(await ConnectAsync(rig, credential, "myapp"));
+                await WaitForClientAsync(rig.Broker, $"myapp@host-{i:00}");
             }
 
             Assert.Equal(count, rig.Broker.ListClients().Count);
@@ -354,7 +354,7 @@ public sealed class RemoteEndToEndTests : IDisposable
         // most of the time, and reconnected forever. It only showed up once a client was
         // left running on a real machine.
         await using var rig = await StartHubAsync();
-        var (bundle, _) = rig.Remote.Issue("OP3R4T0RV2");
+        var (bundle, _) = rig.Remote.Issue("MACHINENAME");
         using var credential = RemoteCredential.Parse(bundle);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
@@ -370,7 +370,7 @@ public sealed class RemoteEndToEndTests : IDisposable
 
         await channel.SendAsync(MessageKind.Register, new RegisterMessage
         {
-            ClientId = "protoface", ProtocolVersion = ProtocolVersion.Current,
+            ClientId = "myapp", ProtocolVersion = ProtocolVersion.Current,
         }, cancellationToken: cts.Token);
 
         // Sit idle -- exactly what a real client does between tool calls -- and require the
@@ -409,14 +409,14 @@ public sealed class RemoteEndToEndTests : IDisposable
         // was never going to satisfy is a self-inflicted disconnect loop that looks exactly
         // like a flaky network -- the hardest kind of bug to attribute.
         await using var rig = await StartHubAsync();
-        var (bundle, _) = rig.Remote.Issue("OP3R4T0RV2");
+        var (bundle, _) = rig.Remote.Issue("MACHINENAME");
         using var credential = RemoteCredential.Parse(bundle);
 
         using var connector = new RemoteChannelConnector(credential, rig.Endpoint, ownsCredential: false);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
 
         var session = await connector.ConnectAsync(
-            new ChannelConnectContext { AppId = "protoface", HeartbeatInterval = TimeSpan.FromSeconds(5) },
+            new ChannelConnectContext { AppId = "myapp", HeartbeatInterval = TimeSpan.FromSeconds(5) },
             cts.Token);
 
         await using (session.Channel)
@@ -448,7 +448,7 @@ public sealed class RemoteEndToEndTests : IDisposable
         // an accepted session must carry multi-megabyte results -- including through the
         // Brotli compression the handshake negotiates.
         await using var rig = await StartHubAsync();
-        var (bundle, _) = rig.Remote.Issue("OP3R4T0RV2");
+        var (bundle, _) = rig.Remote.Issue("MACHINENAME");
         using var credential = RemoteCredential.Parse(bundle);
 
         var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
@@ -458,11 +458,11 @@ public sealed class RemoteEndToEndTests : IDisposable
 
         await channel.SendAsync(MessageKind.Register, new RegisterMessage
         {
-            ClientId = "protoface", ProtocolVersion = ProtocolVersion.Current,
+            ClientId = "myapp", ProtocolVersion = ProtocolVersion.Current,
         }, cancellationToken: cts.Token);
         await channel.SendAsync(MessageKind.ToolList, new ToolListMessage
         {
-            ClientId = "protoface",
+            ClientId = "myapp",
             Tools = [new ToolDescriptor { Name = "screenshot_window", ReadOnly = true }],
         }, cancellationToken: cts.Token);
 
@@ -473,7 +473,7 @@ public sealed class RemoteEndToEndTests : IDisposable
             var invoke = envelope!.Unwrap<InvokeToolMessage>()!;
             await channel.SendAsync(MessageKind.ToolResult, new ToolResultMessage
             {
-                ClientId = "protoface",
+                ClientId = "myapp",
                 ToolName = invoke.ToolName,
                 Content = JsonSerializer.SerializeToElement(new[]
                 {
@@ -484,7 +484,7 @@ public sealed class RemoteEndToEndTests : IDisposable
 
         try
         {
-            var info = await WaitForClientAsync(rig.Broker, "protoface@OP3R4T0RV2");
+            var info = await WaitForClientAsync(rig.Broker, "myapp@MACHINENAME");
             var result = await rig.Broker.InvokeOnClientAsync(info.ClientId, "screenshot_window", null);
 
             Assert.False(result.IsError);

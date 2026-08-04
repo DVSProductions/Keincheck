@@ -133,8 +133,8 @@ public sealed record ClientSessionContext
     public string? PeerAddress { get; init; }
 
     /// <summary>
-    /// Whether this client starts read-only. True for remote: "look at the suit" is always
-    /// safe, and "drive the suit" should be a deliberate act.
+    /// Whether this client starts read-only. True for remote: "look at the remote machine" is always
+    /// safe, and "drive the remote machine" should be a deliberate act.
     /// </summary>
     public bool ReadOnlyDefault { get; init; }
 
@@ -205,7 +205,7 @@ public sealed record ClientInfo
     /// <remarks>
     /// Taken from the common name of the certificate the hub validated — never self-reported,
     /// and never derived from the peer address, which is always loopback when the session
-    /// arrives through an SSH tunnel. It is what makes <c>protoface@OP3R4T0RV2</c> mean
+    /// arrives through an SSH tunnel. It is what makes <c>myapp@MACHINENAME</c> mean
     /// something.
     /// </remarks>
     public string? Host { get; init; }

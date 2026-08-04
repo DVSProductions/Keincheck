@@ -114,7 +114,7 @@ public static class RemoteHandshake
         // through the TLS exchange, or a hub busy enough to miss the deadline once all produce
         // it, and every one of them clears by itself. Treating it as permanent meant a single
         // stalled handshake retired the client until someone restarted the app — the exact
-        // opposite of the roaming-suit behaviour remote exists for.
+        // opposite of the roaming-client behaviour remote exists for.
         private static bool IsRetryableCode(string code) => code is RejectReason.TooManySessions
             or RejectReason.RateLimited
             or RejectReason.RemoteDisabled
