@@ -16,11 +16,6 @@ public static class ApplicationClientExtensions
     /// <summary>
     /// Starts the broker client for <paramref name="app"/> and returns a handle that
     /// disconnects gracefully when disposed.
-    /// <para>
-    /// <b>STAGE A:</b> the wiring is complete but <see cref="WpfUiAdapter"/> is a
-    /// scaffold (its members throw until Stage B), so tool invocations will surface a
-    /// <see cref="NotImplementedException"/> until the adapter is implemented.
-    /// </para>
     /// </summary>
     public static IDisposable UseKeincheckClient(this Application app, Action<McpClientOptions> configure)
     {

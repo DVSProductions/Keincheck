@@ -11,7 +11,7 @@ your running Avalonia 12 UI — list windows, walk the visual/logical tree, read
 write control properties, invoke controls through UI Automation, send synthetic input,
 capture screenshots, and read binding errors.
 
-**Supported UI frameworks:** Avalonia 12 today; WPF in progress. The introspection engine
+**Supported UI frameworks:** Avalonia 12 and WPF. The introspection engine
 is framework-free and reaches the UI through a single neutral seam (`IUiAdapter`), so new
 toolkits plug in as adapter packages without touching the engine.
 
@@ -75,7 +75,7 @@ Point any MCP-capable client at `http://127.0.0.1:3001`.
 
 ```mermaid
 flowchart TB
-    ai["AI client<br/>(Claude Code / Desktop)"]
+    ai["AI client<br/>(Claude Code / Desktop, Kimi Code)"]
     shim["keincheck-connect<br/>stdio shim<br/>(ensures the hub is up)"]
     hub["Keincheck.Hub — Velopack daemon, tray<br/>MCP server: meta-tools + proxy of the active app<br/>named-pipe broker · registry + launcher<br/>audit log · per-app read-only toggle"]
     app1["Your app<br/>+ UseMcpClient"]
@@ -299,7 +299,7 @@ every attach, detach and authentication failure with its reason.
 | `Keincheck.Protocol` | net8.0 | Zero-dependency wire: named-pipe transport, chunked framing, message DTOs |
 | `Keincheck.Core` | net8.0 | **Framework-free** introspection engine: registry, selectors, serializer, the 27 UI tools, and the neutral `IUiAdapter` / `IUiDispatcher` seam (no UI-toolkit reference) |
 | `Keincheck.Avalonia` | net8.0 | Avalonia 12 adapter: `AvaloniaUiAdapter` + `AvaloniaUiDispatcher` behind the seam, plus the Avalonia `UseMcpClient` |
-| `Keincheck.Wpf` | net8.0-windows | WPF adapter — **in progress** (scaffolded `WpfUiAdapter`, real `WpfUiDispatcher`, `UseKeincheckClient`) |
+| `Keincheck.Wpf` | net8.0-windows | WPF adapter: `WpfUiAdapter` + `WpfUiDispatcher` behind the seam, plus the WPF `UseKeincheckClient` |
 | `Keincheck.Client` | net8.0 | **Framework-free** broker client (`BrokerClientHost.Start`) — named-pipe, **no ASP.NET** |
 | `Keincheck.Hub` | net10.0 | The broker daemon: pipe server, registry, launcher/restart, MCP proxy, tray (Velopack) |
 | `Keincheck.Connect` | net8.0 | The stdio shim an MCP client spawns |
@@ -312,7 +312,7 @@ every attach, detach and authentication failure with its reason.
 The engine is **framework-free**: `Keincheck.Core` knows nothing about any UI toolkit and
 talks to the live UI only through the neutral `IUiAdapter` / `IUiDispatcher` seam. A new
 framework plugs in by implementing that seam in its own adapter package (as
-`Keincheck.Avalonia` does for Avalonia and `Keincheck.Wpf` is doing for WPF) — no engine
+`Keincheck.Avalonia` does for Avalonia and `Keincheck.Wpf` does for WPF) — no engine
 changes required.
 
 Libraries target **net8.0** for broad compatibility; the desktop/test apps target
