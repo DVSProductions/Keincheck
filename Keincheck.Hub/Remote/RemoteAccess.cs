@@ -126,7 +126,12 @@ public sealed class RemoteAccess : IAsyncDisposable
 
             // A durable trail starts when remote access does. Until then the in-memory ring is
             // enough, because everything it records happened on this machine, initiated here.
-            _audit.Sink ??= new JsonlAuditSink();
+            //
+            // The directory is derived from the store's rather than defaulted, so it lands beside
+            // the CA that authorises the sessions being recorded. That also stops a test — which
+            // always points the store at a temp directory — from writing into, and size-pruning,
+            // the developer's real %APPDATA%\Keincheck\audit as a side effect of enabling remote.
+            _audit.Sink ??= new JsonlAuditSink(Path.Combine(_store.Directory, "audit"));
 
             _listener ??= new RemoteClientListener(_broker, _store, _audit, _log);
             if (!_listener.TryStart())

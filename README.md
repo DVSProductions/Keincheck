@@ -250,7 +250,8 @@ exactly the same tools as a local app. **No new AI-facing tools for driving** �
 - **Revocable.** A credential baked into a shipped build is extractable from that build.
   Every issued credential is listed and can be revoked; it stops working on the next connect.
 - **Audited.** Attach, detach, auth failure, issuance and revocation are recorded, and once
-  remote is enabled the trail is also written to `%APPDATA%\Keincheck\audit\*.jsonl`.
+  remote is enabled the trail is also written to `%APPDATA%\Keincheck\remote\audit\*.jsonl` —
+  beside the certificate authority that issued the credentials it records.
 
 Binding a non-loopback address is allowed — mutual TLS, not the network boundary, is what
 protects the hub — but it is always an explicit choice, and you will need a firewall rule.
@@ -267,8 +268,8 @@ protects the hub — but it is always an explicit choice, and you will need a fi
 | `click_at` is *"refused"* | Working as intended — remote starts read-only. `hub_set_readonly { clientId, readOnly: false }`. |
 | `hub_restart_client` fails on a remote client | Also intended. The hub cannot start a process on another machine; it refuses rather than risk starting a local copy. Use `hub_wait_for_client` — remote clients reconnect on their own. |
 
-The hub's audit trail (`%APPDATA%\Keincheck\audit\*.jsonl`, and the tray window) records every
-attach, detach and authentication failure with its reason.
+The hub's audit trail (`%APPDATA%\Keincheck\remote\audit\*.jsonl`, and the tray window) records
+every attach, detach and authentication failure with its reason.
 
 ## Projects
 

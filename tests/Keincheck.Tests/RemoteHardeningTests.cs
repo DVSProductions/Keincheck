@@ -133,6 +133,42 @@ public sealed class RemoteHardeningTests : IDisposable
     }
 
     [Fact]
+    public async Task Enabling_Remote_Writes_Its_Trail_Beside_The_CA_Not_Into_The_Real_AppData()
+    {
+        // The sink was constructed with no directory, so it defaulted to
+        // %APPDATA%\Keincheck\audit -- the developer's REAL one. Every test that enabled remote
+        // therefore appended to it and, worse, ran the size-prune that deletes the oldest files.
+        // A unit suite quietly editing state outside its temp directory is a bug in its own
+        // right; deleting a security audit trail as a side effect of `dotnet test` is a worse
+        // one. Deriving the path from the store also puts the trail beside the CA that
+        // authorises the sessions it records, which is where it belongs anyway.
+        var audit = new HubAuditLog();
+        await using var broker = new PipeClientBroker(
+            new BrokerOptions
+            {
+                WatchdogInterval = TimeSpan.FromHours(1),
+                PipeName = $"Keincheck.test.{Guid.NewGuid():N}",
+            },
+            KnownClientStore.Open(Path.Combine(_dir, "known-audit.json")),
+            audit);
+
+        var remoteDir = Path.Combine(_dir, "remote-audit");
+        using var store = RemoteStore.Open(remoteDir);
+        await using var access = new RemoteAccess(broker, audit, store);
+        await access.EnableAsync(new RemoteSettings { Enabled = true, BindAddress = "127.0.0.1", Port = 0 });
+
+        var sink = Assert.IsType<Keincheck.Hub.Remote.JsonlAuditSink>(audit.Sink);
+        Assert.Equal(
+            Path.GetFullPath(Path.Combine(remoteDir, "audit")),
+            Path.GetFullPath(sink.Directory));
+
+        // And prove it independently of the property: enabling emits entries, so the files must
+        // actually appear under the temp tree.
+        Assert.True(Directory.Exists(sink.Directory), "the sink never created its directory");
+        Assert.StartsWith(Path.GetFullPath(_dir), Path.GetFullPath(sink.Directory), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Disable_Then_Enable_On_A_New_Port_Actually_Moves_The_Socket()
     {
         // Changing the port used to persist the new value, keep the old socket, and report

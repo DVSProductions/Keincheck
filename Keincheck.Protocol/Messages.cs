@@ -10,7 +10,10 @@ namespace Keincheck.Protocol;
 /// </summary>
 public enum MessageKind
 {
-    /// <summary>Unset / unknown. Treated as a protocol error.</summary>
+    /// <summary>
+    /// Unset, or a kind this build does not know. Receivers <b>ignore</b> it and keep the
+    /// session alive: a newer peer adding a kind must not be able to kill an older peer.
+    /// </summary>
     Unknown = 0,
 
     /// <summary>Client → Hub: a host app announces itself and its protocol version (<see cref="RegisterMessage"/>).</summary>

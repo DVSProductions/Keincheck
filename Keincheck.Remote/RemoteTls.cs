@@ -168,11 +168,31 @@ public static class RemoteTls
         {
             leaf = RemoteCertificates.LoadPublic(presented.Export(X509ContentType.Cert));
 
+            var declaresRequiredEku = false;
             foreach (var extension in leaf.Extensions)
             {
                 if (extension is X509BasicConstraintsExtension { CertificateAuthority: true })
                     return null;
+
+                if (extension is X509EnhancedKeyUsageExtension eku)
+                {
+                    foreach (var oid in eku.EnhancedKeyUsages)
+                    {
+                        if (oid.Value == requiredEkuOid)
+                            declaresRequiredEku = true;
+                    }
+                }
             }
+
+            // ApplicationPolicy alone is NOT sufficient. It implements RFC 5280, where an ABSENT
+            // EKU extension means "valid for any purpose" — so a leaf carrying no EKU at all
+            // satisfies the chain check for BOTH roles, and the role separation this method
+            // exists to enforce quietly evaporates. Requiring the OID to be present makes the
+            // property the code claims ("EKU present and correct") the property it enforces,
+            // rather than the weaker "EKU compatible". Every certificate the hub issues declares
+            // one (RemoteCertificates.CreateLeaf), so this rejects nothing legitimate.
+            if (!declaresRequiredEku)
+                return null;
 
             using var chain = new X509Chain();
             chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;

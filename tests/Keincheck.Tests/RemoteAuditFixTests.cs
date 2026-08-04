@@ -244,6 +244,52 @@ public sealed class RemoteAuditFixTests
         Assert.DoesNotContain("cannot start or stop processes", ex.Message);
     }
 
+    [Theory]
+    [InlineData("protoface@OP3R4T0RV2")]
+    [InlineData("PROTOFACE@op3r4t0rv2")]
+    public async Task Launching_By_The_AppId_At_Host_Spelling_Is_Refused_As_Remote(string spelling)
+    {
+        // The third spelling, and the one that skipped the guard entirely. The registry is keyed
+        // "protoface@OP3R4T0RV2#1", so this misses both dictionaries; and the fallback scan
+        // compared only the BARE app id, which this is not either. So `known` stayed null and
+        // EnsureLaunchable returned without deciding anything.
+        //
+        // It could not actually start a local process -- SanitizeAppId maps '@' to '_', so no
+        // local profile can ever be keyed with one. What shipped was the wrong ERROR: the
+        // operator got "has no recorded executable path to launch", which reads as "record a
+        // path for it", when the truth is "that process is on another machine". Every other
+        // clientId-taking tool rejects this spelling cleanly; launch was the odd one out.
+        var storePath = Path.Combine(Path.GetTempPath(), $"kc-athost-{Guid.NewGuid():N}.json");
+        var store = KnownClientStore.Open(storePath);
+
+        await using var broker = NewBroker(store);
+        await using var remote = await ConnectAsync(broker, "protoface", Remote);
+
+        var launch = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => broker.LaunchClientAsync(spelling));
+        Assert.Contains("cannot start or stop processes", launch.Message);
+        Assert.DoesNotContain("no recorded executable path", launch.Message);
+
+        // Restart takes the same guard and must answer the same way.
+        var restart = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => broker.RestartClientAsync(spelling));
+        Assert.Contains("cannot start or stop processes", restart.Message);
+    }
+
+    [Fact]
+    public async Task The_Refusal_Names_The_Machine_The_App_Is_Actually_On()
+    {
+        // The message is the whole point of the fix, so assert the operator is pointed at the
+        // right machine rather than merely refused.
+        var storePath = Path.Combine(Path.GetTempPath(), $"kc-athost2-{Guid.NewGuid():N}.json");
+        await using var broker = NewBroker(KnownClientStore.Open(storePath));
+        await using var remote = await ConnectAsync(broker, "protoface", Remote);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => broker.LaunchClientAsync("protoface@OP3R4T0RV2"));
+        Assert.Contains("OP3R4T0RV2", ex.Message);
+    }
+
     private sealed class Duplex(Stream read, Stream write) : Stream
     {
         public override bool CanRead => true;

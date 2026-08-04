@@ -26,6 +26,21 @@ public sealed class BrokerOptions
     public TimeSpan InvokeTimeout { get; set; } = TimeSpan.FromSeconds(60);
 
     /// <summary>
+    /// How long a <b>non-pipe</b> session may stay connected without registering (or asking
+    /// to enroll) before the hub drops it. <see cref="Timeout.InfiniteTimeSpan"/> disables it.
+    /// </summary>
+    /// <remarks>
+    /// The heartbeat watchdog only sees clients that reached the registry, so until a session
+    /// registers nothing is watching it at all. A remote peer that completes the TLS handshake
+    /// and then simply says nothing would otherwise park in <c>ReceiveAsync</c> for the hub's
+    /// entire lifetime, holding a socket, an <c>SslStream</c>, a session task and a heartbeat
+    /// pump that keeps writing every few seconds — and leaving an <c>Attach</c> audit entry
+    /// with no matching <c>Detach</c>. Repeat at will and it is an unbounded leak.
+    /// Deliberately generous: it only has to be shorter than "forever".
+    /// </remarks>
+    public TimeSpan RegistrationTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// When true, the first instance of an app is assigned the bare id
     /// <c>#1</c> suffix (e.g. <c>MyApp#1</c>); always-suffixed keeps ids predictable.
     /// </summary>
@@ -201,11 +216,26 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     private async Task ServeClientAsync(PipeChannel channel, ClientSessionContext context, CancellationToken ct)
     {
         LiveClient? client = null;
+
+        // Until this session registers, the heartbeat watchdog cannot see it — it only scans
+        // the registry. So a remote peer that finishes the handshake and then goes quiet is
+        // watched by nothing. Give the unregistered phase its own deadline; it is dropped as
+        // soon as the client is in the registry, from which point the watchdog owns liveness.
+        // The local pipe is exempt: it is CurrentUserOnly, so a peer that could wedge a session
+        // there can already do strictly worse things directly.
+        var registrationDeadline =
+            context.Transport != ClientTransport.Pipe && _options.RegistrationTimeout > TimeSpan.Zero
+                ? CancellationTokenSource.CreateLinkedTokenSource(ct)
+                : null;
+        registrationDeadline?.CancelAfter(_options.RegistrationTimeout);
+
         try
         {
+            var receiveToken = registrationDeadline?.Token ?? ct;
+
             while (!ct.IsCancellationRequested)
             {
-                var envelope = await channel.ReceiveAsync(ct).ConfigureAwait(false);
+                var envelope = await channel.ReceiveAsync(receiveToken).ConfigureAwait(false);
                 if (envelope is null)
                     break; // clean EOF — client closed the pipe
 
@@ -223,6 +253,11 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
                             throw new ProtocolException(
                                 $"Client '{client.ClientId}' sent a second Register on one session.");
                         client = HandleRegister(channel, context, envelope);
+
+                        // Registered: the watchdog can see it now, so retire the deadline and
+                        // stop reading against a token that is about to fire.
+                        registrationDeadline?.CancelAfter(Timeout.InfiniteTimeSpan);
+                        receiveToken = ct;
                         break;
 
                     case MessageKind.ToolList:
@@ -250,6 +285,20 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
                 }
             }
         }
+        catch (OperationCanceledException) when (registrationDeadline?.IsCancellationRequested == true
+                                                 && !ct.IsCancellationRequested)
+        {
+            // Not a shutdown: this peer authenticated and then never registered.
+            Debug.WriteLine(
+                $"[Hub] dropping an unregistered {context.Transport} session from " +
+                $"'{context.Host ?? context.PeerAddress ?? "?"}' after {_options.RegistrationTimeout}.");
+            _audit.Add(Remote.RemoteAudit.Entry(
+                AuditKind.AuthFailure,
+                $"dropped an unregistered session from {context.Host ?? context.PeerAddress ?? "?"}",
+                host: context.Host,
+                transport: context.Transport,
+                error: $"no Register within {_options.RegistrationTimeout}"));
+        }
         catch (OperationCanceledException) { /* shutting down */ }
         catch (Exception ex)
         {
@@ -257,6 +306,7 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
         }
         finally
         {
+            registrationDeadline?.Dispose();
             if (client is not null)
                 Disconnect(client, graceful: false, reason: "transport closed");
             await channel.DisposeAsync().ConfigureAwait(false);
@@ -789,8 +839,16 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
             // clients is refused too.
             if (known is null)
             {
+                // Match the bare app id AND the composite `AppId@Host` — the spelling the guide
+                // teaches for disambiguating one app across machines. It misses both dictionaries
+                // (they are keyed with the `#n` suffix) and it is not the bare AppId either, so
+                // matching only on AppId left this spelling as the one way into the launch path
+                // with the guard skipped. The operator then got "has no recorded executable path
+                // to launch" — which reads as "record a path" when the truth is "that process is
+                // on another machine".
                 var candidates = _live.Values
-                    .Where(c => string.Equals(c.AppId, clientId, StringComparison.OrdinalIgnoreCase))
+                    .Where(c => string.Equals(c.AppId, clientId, StringComparison.OrdinalIgnoreCase)
+                             || string.Equals(c.IdentityKey, clientId, StringComparison.OrdinalIgnoreCase))
                     .ToList();
                 if (candidates.Count > 0 && candidates.TrueForAll(c => !c.CanLaunch))
                     known = Snapshot_NoLock(candidates[0]);

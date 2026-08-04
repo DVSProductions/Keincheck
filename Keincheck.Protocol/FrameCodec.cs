@@ -311,6 +311,16 @@ public static class FrameCodec
             if (chunkLength > (uint)maxChunkPayload)
                 throw new ProtocolException($"Chunk length {chunkLength} exceeds the maximum of {maxChunkPayload} bytes.");
 
+            // An empty non-final chunk is the one input both caps are blind to: it fails
+            // `> maxChunkPayload` and it adds nothing to `assembled`, so a peer can stream
+            // them forever at 9 bytes each and neither bound can ever fire. The writer above
+            // cannot produce one (take == 0 only when total == 0, which sets isFinal), and the
+            // wire format defines the empty message as a single FINAL chunk — so this carries
+            // no data any well-formed frame could need. Every non-zero length is already
+            // bounded: the frame grows, so maxMessageSize terminates it.
+            if (chunkLength == 0 && !isFinal)
+                throw new ProtocolException("Empty non-final chunk; a frame cannot be padded with data-less chunks.");
+
             if (assembled.Length + chunkLength > maxMessageSize)
                 throw new ProtocolException($"Reassembled message would exceed the maximum of {maxMessageSize} bytes.");
 
