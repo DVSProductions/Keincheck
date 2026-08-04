@@ -86,8 +86,16 @@ jobs:
         run: |
           $setup = "Releases\Keincheck.Hub-win-Setup.exe"
           if (-not (Test-Path $setup)) { throw "vpk pack produced no installer at $setup" }
-          & $setup --silent --installto "$env:RUNNER_TEMP\kc-hub" --log "$env:RUNNER_TEMP\velopack-setup.log"
-          if ($LASTEXITCODE -ne 0) { throw "Setup.exe exited $LASTEXITCODE" }
+          # Start-Process -Wait, not `&`. Velopack's Setup.exe is a GUI-subsystem binary, so the
+          # call operator returns as soon as it is launched and never sets $LASTEXITCODE — the
+          # guard below then compared $null against 0, threw "Setup.exe exited " with a blank
+          # code, and failed the job a second and a half BEFORE the installer logged
+          # "Installation completed successfully!". The install was fine; the check was racing it.
+          $p = Start-Process -FilePath $setup -Wait -PassThru -ArgumentList @(
+            '--silent',
+            '--installto', "$env:RUNNER_TEMP\kc-hub",
+            '--log',       "$env:RUNNER_TEMP\velopack-setup.log")
+          if ($p.ExitCode -ne 0) { throw "Setup.exe exited $($p.ExitCode)" }
 
       - name: Assert the installed layout
         run: |
