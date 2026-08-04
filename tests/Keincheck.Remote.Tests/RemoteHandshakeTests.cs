@@ -136,12 +136,43 @@ public sealed class RemoteHandshakeTests
     [InlineData(RejectReason.RateLimited, true)]
     [InlineData(RejectReason.RemoteDisabled, true)]
     [InlineData(RejectReason.Internal, true)]
+    // Transient by definition: a congested tunnel, a wifi flap mid-TLS, or a momentarily busy
+    // hub. Classified permanent, it retired the client until the app was restarted -- and this
+    // theory used to list every code EXCEPT this one, so nothing noticed.
+    [InlineData(RejectReason.HandshakeTimeout, true)]
     [InlineData(RejectReason.Revoked, false)]
     [InlineData(RejectReason.VersionUnsupported, false)]
     [InlineData(RejectReason.NotPermittedOnTransport, false)]
     public void Retryability_Distinguishes_Transient_Refusals_From_Permanent_Ones(string code, bool retryable)
     {
         Assert.Equal(retryable, new RemoteHandshake.RejectedException(code, null).IsRetryable);
+    }
+
+    [Fact]
+    public void Every_Reject_Code_Has_A_Stated_Retryability()
+    {
+        // The omission above was invisible because the theory enumerated codes by hand. Anchor
+        // it to the source of truth instead: a new RejectReason now fails here until someone
+        // decides, deliberately, which side of the line it sits on. Defaulting to permanent is
+        // the dangerous direction -- it does not degrade a session, it ends the client.
+        var declared = typeof(RejectReason)
+            .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .Where(f => f.IsLiteral && f.FieldType == typeof(string))
+            .Select(f => (string)f.GetRawConstantValue()!)
+            .ToList();
+
+        var covered = typeof(RemoteHandshakeTests)
+            .GetMethod(nameof(Retryability_Distinguishes_Transient_Refusals_From_Permanent_Ones))!
+            .GetCustomAttributes(typeof(InlineDataAttribute), false)
+            .Cast<InlineDataAttribute>()
+            .Select(d => (string)d.GetData(null!).First()[0]!)
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.NotEmpty(declared);
+        var missing = declared.Where(c => !covered.Contains(c)).ToList();
+        Assert.True(missing.Count == 0,
+            $"RejectReason code(s) with no stated retryability: {string.Join(", ", missing)}. " +
+            "Add an InlineData row deciding whether a client should retry or give up.");
     }
 
     [Fact]

@@ -106,9 +106,19 @@ public static class RemoteHandshake
         /// </summary>
         public bool IsRetryable => IsRetryableCode(Code);
 
+        // Anything not listed here is permanent, and a permanent verdict makes the client's
+        // reconnect loop break for good rather than back off — so a code landing on the wrong
+        // side of this list is the difference between "recovers on its own" and "needs the app
+        // restarted". HandshakeTimeout belongs here despite reading like a failure: it is the
+        // most transient condition of the whole set. A congested SSH tunnel, a wifi flap partway
+        // through the TLS exchange, or a hub busy enough to miss the deadline once all produce
+        // it, and every one of them clears by itself. Treating it as permanent meant a single
+        // stalled handshake retired the client until someone restarted the app — the exact
+        // opposite of the roaming-suit behaviour remote exists for.
         private static bool IsRetryableCode(string code) => code is RejectReason.TooManySessions
             or RejectReason.RateLimited
             or RejectReason.RemoteDisabled
+            or RejectReason.HandshakeTimeout
             or RejectReason.Internal;
     }
 

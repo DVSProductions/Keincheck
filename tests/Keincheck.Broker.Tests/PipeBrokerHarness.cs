@@ -356,8 +356,13 @@ internal sealed class PipeBrokerHarness : IAsyncDisposable
             sessions = _sessions.Values.ToList();
             _sessions.Clear();
         }
+        // Bounded for the same reason as the accept loop below: disposing a pipe channel with a
+        // read pending can block, and one stuck session must not take the process with it.
         foreach (var s in sessions)
-            await s.Channel.DisposeAsync().ConfigureAwait(false);
+        {
+            try { await s.Channel.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false); }
+            catch { /* already torn down, or refusing to */ }
+        }
 
         // Unblock the accept loop, which is parked in WaitForConnectionAsync, by poking
         // the pipe with a throwaway client connect. Cancellation handles the rest.
@@ -368,7 +373,14 @@ internal sealed class PipeBrokerHarness : IAsyncDisposable
         }
         catch { /* the loop may already be torn down */ }
 
-        try { await _acceptLoop.ConfigureAwait(false); } catch { /* ignore */ }
+        // Bounded as insurance, not as a fix. Cancellation is plumbed into
+        // WaitForConnectionAsync and the poke above is a second release path, so this should
+        // return immediately. The bound exists because teardown is the worst place to block:
+        // it produces no test failure, no output and no clue -- just a testhost sitting at ~0%
+        // CPU until the outer runner gives up on the whole run. Cap it and move on.
+        try { await _acceptLoop.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false); }
+        catch { /* cancelled, faulted, or refused to stop */ }
+
         _cts.Dispose();
     }
 
