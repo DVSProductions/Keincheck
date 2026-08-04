@@ -1,0 +1,116 @@
+<Project>
+
+  <!--
+    Build-time credential resolution for Keincheck.Remote.
+
+    There are three ways to give an app a credential, and this file implements the ordering
+    between them so they compose rather than compete:
+
+      1. Ask the hub for one and hand it over yourself, at runtime. Nothing here is involved:
+         set KEINCHECK_REMOTE (the bundle) or KEINCHECK_REMOTE_FILE (a path to it) on the
+         machine that will run the app, and RemoteChannelConnector.FromEnvironment() picks it
+         up. The right default for a machine you provision once.
+
+      2. Let the build ask, when no credential is available. Set KeincheckRemoteEnroll=true and
+         the build calls the installed hub to mint one and embeds it. Convenient on a developer
+         machine; needs a hub with remote access already enabled.
+
+      3. Ask the hub yourself (option 1) and save it where the build can see it, for CI.
+         Point KeincheckRemoteCredentialFile at the file, or set KEINCHECK_REMOTE_FILE, and the
+         build embeds THAT instead of asking anyone. Nothing contacts a hub, which is what
+         makes it work on a build agent.
+
+    Option 3 always wins over option 2. If you supplied a credential, the build must never
+    quietly mint a different one.
+
+    OFF by default. Every build phoning a hub would be surprising, would fill the hub's issued
+    list, and would fail on any machine without one.
+  -->
+
+  <PropertyGroup>
+    <KeincheckRemoteEnroll Condition="'$(KeincheckRemoteEnroll)' == ''">false</KeincheckRemoteEnroll>
+    <KeincheckRemoteTarget Condition="'$(KeincheckRemoteTarget)' == ''">$(COMPUTERNAME)</KeincheckRemoteTarget>
+    <KeincheckRemoteRenewWithinDays Condition="'$(KeincheckRemoteRenewWithinDays)' == ''">14</KeincheckRemoteRenewWithinDays>
+    <KeincheckRemoteEmbedCredential Condition="'$(KeincheckRemoteEmbedCredential)' == ''">true</KeincheckRemoteEmbedCredential>
+  </PropertyGroup>
+
+  <Target Name="KeincheckResolveRemoteCredential"
+          BeforeTargets="BeforeCompile"
+          Condition="'$(KeincheckRemoteEnroll)' == 'true' or '$(KeincheckRemoteCredentialFile)' != ''">
+
+    <!--
+      Resolved INSIDE the target and made absolute. $(IntermediateOutputPath) is not set when
+      this file is evaluated, so defaulting it above wrote the credential to the PROJECT ROOT:
+      a secret in the source tree, ready to be committed.
+    -->
+    <PropertyGroup>
+      <_KeincheckSuppliedCredential Condition="'$(KeincheckRemoteCredentialFile)' != ''">$(KeincheckRemoteCredentialFile)</_KeincheckSuppliedCredential>
+      <_KeincheckSuppliedCredential Condition="'$(_KeincheckSuppliedCredential)' == '' and '$(KEINCHECK_REMOTE_FILE)' != ''">$(KEINCHECK_REMOTE_FILE)</_KeincheckSuppliedCredential>
+      <_KeincheckMintedCredential>$([System.IO.Path]::GetFullPath('$(ProjectDir)$(IntermediateOutputPath)keincheck-remote.credential'))</_KeincheckMintedCredential>
+    </PropertyGroup>
+
+    <Error Condition="'$(_KeincheckSuppliedCredential)' != '' and !Exists('$(_KeincheckSuppliedCredential)')"
+           Text="Keincheck: the credential file '$(_KeincheckSuppliedCredential)' does not exist. Issue one with hub_remote_issue, or from the hub window." />
+
+    <!-- Option 3: a credential was supplied. Use it and contact nothing. -->
+    <PropertyGroup Condition="'$(_KeincheckSuppliedCredential)' != ''">
+      <_KeincheckCredentialPath>$(_KeincheckSuppliedCredential)</_KeincheckCredentialPath>
+    </PropertyGroup>
+
+    <!--
+      Option 2: nothing supplied, so ask the installed hub. Deliberately inline rather than a
+      CallTarget: properties set by this target are not visible to one invoked through
+      CallTarget, which silently passed an empty output path and made the hub reject the call.
+      The hub is the enrollment authority and is already installed, so it is what gets called;
+      shipping a second executable to ask it for one credential would mean packaging,
+      versioning and updating another binary, and a second copy of the pipe and framing code.
+    -->
+    <PropertyGroup Condition="'$(_KeincheckCredentialPath)' == '' and '$(KeincheckRemoteEnroll)' == 'true'">
+      <_KeincheckHubExe Condition="'$(KeincheckHubExe)' != ''">$(KeincheckHubExe)</_KeincheckHubExe>
+      <_KeincheckHubExe Condition="'$(_KeincheckHubExe)' == '' and '$(KEINCHECK_HUB_EXE)' != ''">$(KEINCHECK_HUB_EXE)</_KeincheckHubExe>
+      <_KeincheckHubExe Condition="'$(_KeincheckHubExe)' == ''">$(LOCALAPPDATA)\Keincheck.Hub\current\Keincheck.Hub.exe</_KeincheckHubExe>
+    </PropertyGroup>
+
+    <Warning Condition="'$(_KeincheckCredentialPath)' == '' and '$(KeincheckRemoteEnroll)' == 'true' and !Exists('$(_KeincheckHubExe)')"
+             Text="Keincheck: no hub found at '$(_KeincheckHubExe)', so no remote credential was issued. Set KeincheckHubExe or KEINCHECK_HUB_EXE, or supply one with KeincheckRemoteCredentialFile. This build will not be remotely debuggable." />
+
+    <!--
+      IgnoreExitCode, and deliberately NO ContinueOnError: ContinueOnError makes MSBuild
+      swallow the task's outputs, so ExitCode came back empty and the diagnostics below never
+      fired, meaning a build with no hub reported complete success and silently produced
+      nothing.
+    -->
+    <Exec Condition="'$(_KeincheckCredentialPath)' == '' and '$(KeincheckRemoteEnroll)' == 'true' and Exists('$(_KeincheckHubExe)')"
+          Command="&quot;$(_KeincheckHubExe)&quot; --issue-credential --target &quot;$(KeincheckRemoteTarget)&quot; --out &quot;$(_KeincheckMintedCredential)&quot; --if-missing --renew-within $(KeincheckRemoteRenewWithinDays) --note &quot;build: $(MSBuildProjectName)&quot;"
+          IgnoreExitCode="true"
+          StandardOutputImportance="low"
+          StandardErrorImportance="normal">
+      <Output TaskParameter="ExitCode" PropertyName="_KeincheckEnrollExit" />
+    </Exec>
+
+    <Warning Condition="'$(_KeincheckEnrollExit)' == '4'"
+             Text="Keincheck: remote access is not enabled on this machine, so no credential was issued. Enable it once in the hub window (or call hub_remote_enable). This build will not be remotely debuggable." />
+    <Warning Condition="'$(_KeincheckEnrollExit)' != '' and '$(_KeincheckEnrollExit)' != '0' and '$(_KeincheckEnrollExit)' != '4'"
+             Text="Keincheck: the hub declined to issue a remote credential (exit $(_KeincheckEnrollExit)). This build will not be remotely debuggable." />
+
+    <PropertyGroup Condition="'$(_KeincheckCredentialPath)' == '' and Exists('$(_KeincheckMintedCredential)')">
+      <_KeincheckCredentialPath>$(_KeincheckMintedCredential)</_KeincheckCredentialPath>
+    </PropertyGroup>
+  </Target>
+
+  <!--
+    Embed whichever credential was resolved. The app reads it back with
+    RemoteCredential.Parse over the "Keincheck.Remote.Credential" manifest resource. Set
+    KeincheckRemoteEmbedCredential=false to resolve one without embedding it, if you would
+    rather deploy it beside the app.
+  -->
+  <Target Name="KeincheckEmbedRemoteCredential"
+          AfterTargets="KeincheckResolveRemoteCredential"
+          Condition="'$(KeincheckRemoteEmbedCredential)' == 'true' and '$(_KeincheckCredentialPath)' != '' and Exists('$(_KeincheckCredentialPath)')">
+    <ItemGroup>
+      <EmbeddedResource Include="$(_KeincheckCredentialPath)" LogicalName="Keincheck.Remote.Credential" />
+    </ItemGroup>
+    <Message Importance="normal" Text="Keincheck: embedded a remote credential from $(_KeincheckCredentialPath)." />
+  </Target>
+
+</Project>

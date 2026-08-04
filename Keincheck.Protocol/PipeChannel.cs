@@ -21,20 +21,56 @@ public sealed class PipeChannel : IAsyncDisposable, IDisposable
     private readonly Stream _stream;
     private readonly bool _ownsStream;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
+    private ChannelLimits _limits;
     private int _disposed;
 
     /// <summary>
     /// Wraps <paramref name="stream"/>. When <paramref name="ownsStream"/> is true
-    /// (the default) disposing the channel disposes the stream.
+    /// (the default) disposing the channel disposes the stream — for a TLS session that
+    /// means <c>SslStream</c> → <c>NetworkStream</c> → socket, provided the
+    /// <c>SslStream</c> was built with <c>leaveInnerStreamOpen: false</c>.
     /// </summary>
+    /// <param name="limits">
+    /// Framing bounds; <see cref="ChannelLimits.Default"/> when omitted. A remote listener
+    /// passes <see cref="ChannelLimits.Handshake"/> and widens it after accepting the session.
+    /// </param>
+    /// <remarks>
+    /// Kept as the exact pre-v2 signature. Adding an optional parameter to this constructor
+    /// instead would have broken binary compatibility with the published package: an assembly
+    /// compiled against 0.9.0 would fail with <c>MissingMethodException</c> at runtime.
+    /// </remarks>
     public PipeChannel(Stream stream, bool ownsStream = true)
+        : this(stream, ownsStream, null)
+    {
+    }
+
+    /// <inheritdoc cref="PipeChannel(Stream, bool)"/>
+    /// <param name="stream">The transport to wrap.</param>
+    /// <param name="ownsStream">Whether disposing the channel disposes the stream.</param>
+    /// <param name="limits">
+    /// Framing bounds; <see cref="ChannelLimits.Default"/> when null. A remote listener passes
+    /// <see cref="ChannelLimits.Handshake"/> and widens it after accepting the session.
+    /// </param>
+    public PipeChannel(Stream stream, bool ownsStream, ChannelLimits? limits)
     {
         _stream = stream ?? throw new ArgumentNullException(nameof(stream));
         _ownsStream = ownsStream;
+        _limits = limits ?? ChannelLimits.Default;
     }
 
     /// <summary>The underlying transport stream (e.g. for liveness checks).</summary>
     public Stream Stream => _stream;
+
+    /// <summary>
+    /// The framing bounds applied to this channel. Settable so a remote session can be
+    /// widened from <see cref="ChannelLimits.Handshake"/> to <see cref="ChannelLimits.Default"/>
+    /// at exactly the moment it becomes trusted, and not before.
+    /// </summary>
+    public ChannelLimits Limits
+    {
+        get => Volatile.Read(ref _limits);
+        set => Volatile.Write(ref _limits, value ?? throw new ArgumentNullException(nameof(value)));
+    }
 
     /// <summary>True once the channel has been disposed.</summary>
     public bool IsDisposed => Volatile.Read(ref _disposed) != 0;
@@ -47,11 +83,16 @@ public sealed class PipeChannel : IAsyncDisposable, IDisposable
     {
         ArgumentNullException.ThrowIfNull(envelope);
         var bytes = JsonSerializer.SerializeToUtf8Bytes(envelope, ProtocolJson.Options);
+        var limits = Limits;
 
         await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await FrameCodec.WriteAsync(_stream, bytes, cancellationToken: cancellationToken).ConfigureAwait(false);
+            await FrameCodec.WriteAsync(
+                _stream, bytes,
+                limits.MaxChunkPayload,
+                compress: limits.AllowCompression,
+                cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -74,7 +115,9 @@ public sealed class PipeChannel : IAsyncDisposable, IDisposable
     /// <exception cref="ProtocolException">The frame was malformed or truncated.</exception>
     public async Task<MessageEnvelope?> ReceiveAsync(CancellationToken cancellationToken = default)
     {
-        var bytes = await FrameCodec.TryReadAsync(_stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var limits = Limits;
+        var bytes = await FrameCodec.TryReadAsync(
+            _stream, limits.MaxChunkPayload, limits.MaxMessageSize, cancellationToken).ConfigureAwait(false);
         if (bytes is null)
             return null;
 

@@ -23,7 +23,31 @@ public sealed class McpClientOptions
     public bool ReadOnly { get; set; }
 
     /// <summary>The pipe to reach the hub on. Defaults to <c>PipeNames.ControlPipe</c>.</summary>
+    /// <remarks>Ignored when <see cref="Connector"/> is set to a non-pipe transport.</remarks>
     public string? PipeName { get; set; }
+
+    /// <summary>
+    /// How the client reaches the hub. Null (the default) means the local named pipe.
+    /// </summary>
+    /// <remarks>
+    /// Set this to attach to a hub on <i>another machine</i>. The implementation lives in the
+    /// separate <c>Keincheck.Remote</c> package — install it and call its <c>UseRemote(...)</c>
+    /// extension. Keeping it out of this assembly is the point: an app that never references
+    /// that package links no socket or TLS code, so it simply cannot be reached remotely.
+    /// </remarks>
+    public Keincheck.Protocol.IChannelConnector? Connector { get; set; }
+
+    /// <summary>
+    /// Called with a human-readable line whenever a connection attempt fails or a session ends.
+    /// </summary>
+    /// <remarks>
+    /// Without this the only report is <c>Debug.WriteLine</c>, which is compiled out of a
+    /// Release build — so a shipped app that cannot attach (a revoked or expired credential,
+    /// the wrong address) fails in complete silence and simply never appears in the hub. The
+    /// hub goes to the trouble of naming every refusal on the wire; something has to be able
+    /// to surface it.
+    /// </remarks>
+    public Action<string>? Log { get; set; }
 
     /// <summary>How long to keep retrying the initial hub connection before giving up. Default 30s.</summary>
     public TimeSpan ConnectTimeout { get; set; } = TimeSpan.FromSeconds(30);

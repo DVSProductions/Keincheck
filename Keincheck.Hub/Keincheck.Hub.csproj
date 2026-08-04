@@ -27,6 +27,15 @@
     <PackageReference Include="Velopack" Version="1.2.0" />
   </ItemGroup>
 
+  <!-- The app-id sanitiser is internal (it is a hardening detail, not API) but is worth
+       testing directly: it is the only defence against a client-chosen identity reaching the
+       registry keys and the AppId@Host disambiguator. -->
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>Keincheck.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
   <!-- Tray icon asset (optional; the app runs without it). Embedded as an Avalonia
        resource so AssetLoader can resolve avares://Keincheck.Hub/Assets/tray.ico. -->
   <ItemGroup>
@@ -38,6 +47,13 @@
          reference Core/Avalonia-introspection: tools execute inside each app, and
          the hub advertises the schemas the client reports. -->
     <ProjectReference Include="..\Keincheck.Protocol\Keincheck.Protocol.csproj" />
+
+    <!-- The listener side of remote access: TLS, the hub's CA, and the credential
+         format. Keincheck.Remote references ONLY Keincheck.Protocol, so this does not
+         drag the client's tool host or the MCP SDK into the hub. Referencing it does
+         not by itself open anything: the listener stays off until an operator enables
+         it, and cannot accept a session before a CA has been provisioned. -->
+    <ProjectReference Include="..\Keincheck.Remote\Keincheck.Remote.csproj" />
   </ItemGroup>
 
 </Project>

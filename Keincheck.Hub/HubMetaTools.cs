@@ -33,6 +33,28 @@ internal static class HubMetaTools
     public const string Status           = "hub_status";
     public const string Guide            = "hub_guide";
 
+    // Lifting read-only is available here for the same reason issuance is: the tray checkbox
+    // and this tool carry identical authorization (runs as this user), so gating one and not
+    // the other is friction, not a boundary. It was tray-only at first, which meant driving a
+    // remote machine from an AI session required alt-tabbing to a GUI to permit it.
+    public const string SetReadOnly      = "hub_set_readonly";
+
+    // Remote access. These administer the listener; they do NOT drive clients — a remote
+    // client is driven through exactly the same tools as a local one, which is the whole
+    // point.
+    //
+    // Issuance is available here, on the same footing as everything else. The MCP endpoint
+    // and the control pipe carry the SAME authorization — both are reachable by anything
+    // running as this user, and nothing else — and the pipe already issues credentials
+    // without a prompt, because that is what the build-time enrollment step uses. Gating the
+    // MCP path while leaving the pipe path open would not have protected anything: a caller
+    // that wanted a credential could simply use the pipe. It would only have been friction.
+    public const string RemoteStatus  = "hub_remote_status";
+    public const string RemoteEnable  = "hub_remote_enable";
+    public const string RemoteDisable = "hub_remote_disable";
+    public const string RemoteIssue   = "hub_remote_issue";
+    public const string RemoteRevoke  = "hub_remote_revoke";
+
     // Record/replay meta-tools. These are listed here (names, schemas, catalog, and
     // IsMetaTool) so they advertise like every other meta-tool, but they are ROUTED in
     // HubMcpServer.HandleCallToolAsync BEFORE this type's DispatchAsync, because they need
@@ -58,6 +80,8 @@ internal static class HubMetaTools
         ListClients or ListKnownClients or LaunchClient or RestartClient
             or SelectClient or ClientStatus or WaitForClient or Status or Guide
             or RecordStart or RecordStop or RecordStatus or Replay or ExportTest
+            or RemoteStatus or RemoteEnable or RemoteDisable or RemoteIssue or RemoteRevoke
+            or SetReadOnly
             or CallTool or ListClientTools => true,
         _ => false,
     };
@@ -123,6 +147,14 @@ internal static class HubMetaTools
             "Report the hub's own version, protocol version, active client, and connected "
             + "client count. No arguments.");
 
+        yield return Meta(SetReadOnly,
+            "Allow or forbid mutating tools (click_at, type_text, set_property, ...) for one "
+            + "client. Remote clients START read-only, so call this with readOnly=false before "
+            + "trying to drive one. The decision is remembered per machine and survives "
+            + "reconnects and hub restarts. "
+            + "Args: { \"clientId\": string, \"readOnly\": bool }.",
+            SetReadOnlySchema(), readOnly: false);
+
         // ---- record / replay / export ----
         // (Routed in HubMcpServer before DispatchAsync; advertised here.)
 
@@ -153,6 +185,42 @@ internal static class HubMetaTools
             + "Args: { \"format\"?: \"json\" | \"csharp\" (default \"json\") }.",
             ExportTestSchema());
 
+        // ---- remote access ----
+
+        yield return Meta(RemoteStatus,
+            "Report whether this hub accepts clients from other machines: enabled, the bound "
+            + "address, and the issued credentials (host, serial, expiry, revoked). Remote "
+            + "clients appear in hub_list_clients as \"appId@host#n\" with host and transport "
+            + "set, and are driven with the SAME tools as local ones. No arguments.");
+
+        yield return Meta(RemoteEnable,
+            "Start accepting clients from other machines, provisioning this hub's certificate "
+            + "authority on first use. Args: { \"bindAddress\"?: string (default "
+            + "\"127.0.0.1\"), \"port\"?: int, \"advertisedEndpoint\"?: string }. This only "
+            + "opens the listener -- a client also needs a credential, from hub_remote_issue.",
+            RemoteEnableSchema(), readOnly: false);
+
+        yield return Meta(RemoteIssue,
+            "Issue a credential a client on another machine uses to attach, provisioning this "
+            + "hub's certificate authority if needed. Args: { \"target\": string (the machine "
+            + "label, which becomes the '@host' in that client's id), \"days\"?: int, "
+            + "\"note\"?: string, \"outPath\"?: string (also write it to a file) }. Returns the "
+            + "credential bundle: set it as KEINCHECK_REMOTE on the target machine, or point "
+            + "KEINCHECK_REMOTE_FILE at the file. Revoke it with hub_remote_revoke.",
+            RemoteIssueSchema(), readOnly: false);
+
+        yield return Meta(RemoteDisable,
+            "Stop accepting clients from other machines. Already-connected remote clients stay "
+            + "until they disconnect. The certificate authority and issued-credential list are "
+            + "kept, so re-enabling does not invalidate existing credentials. No arguments.",
+            readOnly: false);
+
+        yield return Meta(RemoteRevoke,
+            "Permanently refuse a remote credential by serial (hub_remote_status lists them). "
+            + "Takes effect on that client's next connection attempt. Use this if a credential "
+            + "leaks -- one baked into a shipped build is extractable from that build. "
+            + "Args: { \"serial\": string }.",
+            RemoteRevokeSchema(), readOnly: false);
         // ---- static-tooling companions ----
         // hub_call_tool is routed in HubMcpServer (it needs the proxy path); advertised here.
 
@@ -310,6 +378,207 @@ internal static class HubMetaTools
                 }
             }
 
+            case RemoteStatus:
+            {
+                var remote = HubRuntime.Remote;
+                if (remote is null)
+                    return JsonResult(new { available = false, reason = "This hub build has no remote support." });
+
+                var settings = remote.Store.Settings;
+                return JsonResult(new
+                {
+                    available = true,
+                    enabled = settings.Enabled,
+                    listening = remote.IsListening,
+                    boundEndpoint = remote.BoundEndpoint,
+                    bindAddress = settings.BindAddress,
+                    port = settings.Port,
+                    advertisedEndpoint = settings.AdvertisedEndpoint,
+                    provisioned = remote.Store.IsProvisioned,
+                    credentials = remote.Store.Issued().Select(c => new
+                    {
+                        c.Serial, c.Host, c.IssuedUtc, c.NotAfter, c.IssuedVia, c.Note, c.Revoked, c.IsUsable,
+                    }),
+                });
+            }
+
+            case RemoteEnable:
+            {
+                var remote = HubRuntime.Remote;
+                if (remote is null)
+                    return ErrorResult("This hub build has no remote support.");
+
+                var current = remote.Store.Settings;
+                var bind = TryGetStringProp(args, "bindAddress") ?? current.BindAddress;
+                if (!System.Net.IPAddress.TryParse(bind, out _))
+                {
+                    return ErrorResult(
+                        $"'{bind}' is not a valid IP address to bind. Use 127.0.0.1 for a tunnelled setup, " +
+                        "a specific interface address, or 0.0.0.0 for all interfaces.");
+                }
+
+                var port = TryGetIntProp(args, "port") ?? current.Port;
+                if (port is <= 0 or > 65535)
+                    return ErrorResult($"Port {port} is out of range.");
+
+                try
+                {
+                    var message = await remote.EnableAsync(current with
+                    {
+                        BindAddress = bind,
+                        Port = port,
+                        AdvertisedEndpoint = TryGetStringProp(args, "advertisedEndpoint") ?? current.AdvertisedEndpoint,
+                    }).ConfigureAwait(false);
+                    return JsonResult(new
+                    {
+                        enabled = true,
+                        listening = remote.IsListening,
+                        boundEndpoint = remote.BoundEndpoint,
+                        message,
+                        // Say this plainly: opening the listener grants nothing on its own, and
+                        // an operator who stops here will otherwise wonder why nothing connects.
+                        next = "No client can attach until it holds a credential. Call hub_remote_issue, "
+                            + "use the hub window, or run keincheck-enroll on the machine that will connect.",
+                    });
+                }
+                catch (Exception ex)
+                {
+                    return ErrorResult($"Failed to enable remote access: {ex.Message}");
+                }
+            }
+
+            case RemoteDisable:
+            {
+                var remote = HubRuntime.Remote;
+                if (remote is null)
+                    return ErrorResult("This hub build has no remote support.");
+
+                await remote.DisableAsync().ConfigureAwait(false);
+                return JsonResult(new { enabled = false, listening = remote.IsListening });
+            }
+
+            case SetReadOnly:
+            {
+                if (!TryGetClientId(args, out var id, out var err))
+                    return ErrorResult(err);
+
+                if (args is not { ValueKind: JsonValueKind.Object } o
+                    || !o.TryGetProperty("readOnly", out var flag)
+                    || flag.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                {
+                    return ErrorResult("Missing required argument: 'readOnly' (true or false).");
+                }
+
+                var info = broker.ClientStatus(id);
+                if (info is null)
+                    return DownClientError(id, "is not known to the hub");
+
+                // Deliberately a cast rather than a new IClientBroker member: keeping that
+                // interface unchanged was an explicit goal of the remote work, and this is an
+                // operator control rather than part of the broker contract the MCP proxy needs.
+                if (broker is not PipeClientBroker concrete)
+                    return ErrorResult("This hub's broker does not support toggling read-only.");
+
+                var value = flag.ValueKind == JsonValueKind.True;
+                concrete.SetReadOnly(id, value);
+
+                return JsonResult(new
+                {
+                    clientId = id,
+                    readOnly = value,
+                    host = info.Host,
+                    remembered = true,
+                    effect = value
+                        ? "Mutating tools are refused for this client."
+                        : "Mutating tools are allowed. Remembered for this machine across "
+                          + "reconnects and hub restarts; call again with readOnly=true to revoke.",
+                });
+            }
+
+            case RemoteIssue:
+            {
+                var remote = HubRuntime.Remote;
+                if (remote is null)
+                    return ErrorResult("This hub build has no remote support.");
+
+                var target = TryGetStringProp(args, "target");
+                if (target is null)
+                    return ErrorResult(
+                        "Missing required argument: 'target' — the machine label this credential "
+                        + "authenticates as (letters, digits, '.', '-' and '_').");
+
+                var days = TryGetIntProp(args, "days");
+                try
+                {
+                    var (bundle, record) = remote.Issue(
+                        target,
+                        days is > 0 ? TimeSpan.FromDays(days.Value) : null,
+                        TryGetStringProp(args, "note"));
+
+                    // Optional, because the credential has to reach another machine somehow and
+                    // a file is usually the easiest way to carry it.
+                    string? written = null;
+                    if (TryGetStringProp(args, "outPath") is { } outPath)
+                    {
+                        try
+                        {
+                            var directory = Path.GetDirectoryName(Path.GetFullPath(outPath));
+                            if (!string.IsNullOrEmpty(directory))
+                                System.IO.Directory.CreateDirectory(directory);
+                            File.WriteAllText(outPath, bundle);
+                            written = Path.GetFullPath(outPath);
+                        }
+                        catch (Exception ex)
+                        {
+                            // The credential exists and is returned regardless; only the
+                            // convenience copy failed, and losing it silently would be worse.
+                            written = $"(could not write '{outPath}': {ex.Message})";
+                        }
+                    }
+
+                    return JsonResult(new
+                    {
+                        bundle,
+                        host = record.Host,
+                        serial = record.Serial,
+                        notAfter = record.NotAfter,
+                        writtenTo = written,
+                        listening = remote.IsListening,
+                        next = remote.IsListening
+                            ? $"Set KEINCHECK_REMOTE to the bundle on {record.Host}, or point "
+                              + "KEINCHECK_REMOTE_FILE at a file holding it."
+                            : "The listener is not running — call hub_remote_enable before the "
+                              + "client tries to attach.",
+                    });
+                }
+                catch (Exception ex)
+                {
+                    return ErrorResult($"Could not issue a credential for '{target}': {ex.Message}");
+                }
+            }
+
+            case RemoteRevoke:
+            {
+                var remote = HubRuntime.Remote;
+                if (remote is null)
+                    return ErrorResult("This hub build has no remote support.");
+
+                var serial = TryGetStringProp(args, "serial");
+                if (serial is null)
+                    return ErrorResult("Missing required argument: 'serial' (see hub_remote_status).");
+
+                return remote.Revoke(serial)
+                    ? JsonResult(new
+                    {
+                        revoked = serial,
+                        // Deliberately not a lie: an already-established session keeps running.
+                        // Revocation is checked on connect, so it lands on the next reconnect.
+                        effect = "That credential is refused from its next connection attempt. "
+                            + "An already-connected session continues until it drops.",
+                    })
+                    : ErrorResult($"'{serial}' is already revoked or not a credential this hub issued.");
+            }
+
             default:
                 // Unreachable: callers gate on IsMetaTool. Defensive only.
                 return ErrorResult($"Unknown meta-tool '{name}'.");
@@ -364,12 +633,90 @@ To block until it is back, call `hub_wait_for_client { "appId": "myapp" }`.
   connects, then return it. Use after launching/rebuilding to wait for the app to come back.
 - `hub_status` — the hub's own version, protocol version, active client, and connected client
   count (per-client builds appear as `clientVersion` in the client lists).
+- `hub_set_readonly { clientId, readOnly }` — allow or forbid mutating tools for one client.
+  Remote clients start read-only, so this is how you get permission to drive one.
 - `hub_launch_client { clientId }` / `hub_restart_client { clientId }` — start / restart a
   known app by its recorded executable path. A restarted client keeps the **same id**.
 - `hub_record_start { name? }` / `hub_record_stop` / `hub_record_status` — record the
   proxied UI tool calls you make.
 - `hub_replay { stopOnError?, delayMs? }` — re-issue the recorded steps.
 - `hub_export_test { format? }` — export the recording as `json` or a `csharp` xUnit skeleton.
+- `hub_remote_status` / `hub_remote_enable` / `hub_remote_disable` / `hub_remote_issue` /
+  `hub_remote_revoke` — attach apps running on **other machines**. See below.
+
+## Apps on other machines
+
+A hub normally only sees apps on its own machine. It can also broker apps running elsewhere —
+a headless box, a device on the bench — and **you drive them with exactly the same tools**. A
+remote client is just a client that has a host:
+
+```
+myapp#1                 <- local, on this machine
+myapp@MACHINENAME#1      <- remote, on the machine labelled MACHINENAME
+```
+
+`hub_list_clients` shows `host`, `transport` (`pipe` or `tcp`), and `canLaunch` for each.
+
+### Making an app remotely debuggable
+
+The app must opt in at build time; the hub cannot reach into an app that did not. Tell the
+user to do this in the app they want to reach — it is three steps and none of them is
+something you can do for them from here:
+
+1. **Add the `Keincheck.Remote` package** to that app. It is deliberately separate from
+   `Keincheck.Client`: an app that does not reference it contains no networking code at all,
+   so it cannot be reached remotely even by accident.
+
+2. **Set the connector** where the app already calls `UseMcpClient`:
+
+   ```csharp
+   builder.UseMcpClient(o =>
+   {
+       o.AppId = "myapp";
+       o.Connector = RemoteChannelConnector.FromEnvironment();   // KEINCHECK_REMOTE[_FILE]
+   });
+   ```
+
+   `FromEnvironment()` returns null when no credential is configured, so the same build still
+   attaches over the local pipe on a developer's machine. Setting `o.Log` is worth suggesting
+   too: without it a failed attach reports only to `Debug.WriteLine`, which a Release build
+   compiles out, so the app just never appears and says nothing.
+   `samples/Keincheck.Demo/Program.cs` in the repo is a working example.
+
+3. **Give it a credential.** On the hub side: `hub_remote_enable`, then
+   `hub_remote_issue { "target": "MACHINENAME" }`. Hand the returned bundle to that machine as
+   the `KEINCHECK_REMOTE` environment variable (or write it to a file and set
+   `KEINCHECK_REMOTE_FILE`). The label you pass as `target` becomes the `@host` in the
+   client's id, so pick the machine's real name.
+
+There are three ways to get a credential, and the hub issues all of them:
+   - ask for one directly (`hub_remote_issue`, the hub window, or
+     `Keincheck.Hub.exe --issue-credential`);
+   - let the build ask when none is available, with
+     `<KeincheckRemoteEnroll>true</KeincheckRemoteEnroll>`;
+   - or supply one you already have via `KeincheckRemoteCredentialFile` /
+     `KEINCHECK_REMOTE_FILE`, which is the CI route and always wins over the build asking.
+
+Finally the client needs a route to the hub. Either bind it somewhere reachable
+(`hub_remote_enable { "bindAddress": "192.168.1.50" }`, which needs an inbound firewall rule on
+the hub machine), or forward a port and skip the firewall — the client always dials, so from
+the hub's machine: `ssh -R 7423:127.0.0.1:7423 MACHINENAME`.
+
+### What is different about a remote client
+
+- **Read-only by default.** Inspection works immediately; mutating tools (`click_at`,
+  `type_text`, `set_property`, ...) are refused until read-only is lifted. To drive a remote
+  app, call `hub_set_readonly { "clientId": "myapp@MACHINENAME#1", "readOnly": false }`
+  first. The decision is remembered for that machine across reconnects and hub restarts, so
+  you only do it once per target — and `hub_list_clients` shows the current state.
+- **Never auto-selected.** A local client can become active on its own; a remote one never
+  does. Always `hub_select_client` explicitly.
+- **Cannot be launched or restarted.** `canLaunch` is false and `hub_launch_client` /
+  `hub_restart_client` will refuse — the process is on another machine. When a remote client
+  drops, it reconnects on its own: use `hub_wait_for_client { "appId": "myapp@MACHINENAME" }`
+  rather than trying to restart it.
+- **Disambiguate by host.** With a local *and* a remote instance of the same app connected,
+  `{ "appId": "myapp" }` may match either. Use `myapp@MACHINENAME` to be specific.
 - `hub_list_client_tools { clientId? }` — list a client's tool descriptors (name,
   description, input schema) without relying on `tools/list_changed`.
 - `hub_call_tool { tool, args?, client? }` — call any client tool by name through the hub.
@@ -431,13 +778,19 @@ coordinates and is robust to layout shifts.
 
 - **No active client?** UI tools return a structured error telling you to
   `hub_select_client` first (or pass a `"client"` arg).
-- **A client dropped?** Calls to it return a `client_unavailable` error naming
-  `hub_restart_client`. Restarting keeps the **same id**, so a recording still replays. If
-  the app was the active one and reconnects on its own (a rebuild loop), it re-becomes
-  active automatically — no need to re-select. Use `hub_wait_for_client` to block for it.
+- **A client dropped?** Calls to it return a `client_unavailable` error naming the recovery
+  tool. For a local client that is `hub_restart_client`, which keeps the **same id** so a
+  recording still replays; if it was active and reconnects on its own (a rebuild loop) it
+  re-becomes active with no re-select. For a **remote** client the error names
+  `hub_wait_for_client` instead — the hub cannot restart a process on another machine, and
+  the client dials back in by itself.
 - **Blank screenshots?** A **locked workstation** renders nothing — screenshots come back
   blank. Unlock the session (or expect empty captures) before relying on vision.
-- **Read-only clients** refuse mutating tools; `hub_client_status` shows the flag.
+- **Read-only clients** refuse mutating tools; `hub_client_status` shows the flag. Remote
+  clients start read-only, so this is the normal state there rather than an unusual one.
+- **Two clients with the same app id?** Check `host`. `myapp#1` and
+  `myapp@MACHINENAME#1` are different machines running the same app, and a bare
+  `{ "appId": "myapp" }` filter may match either.
 """;
 
     // ---- structured errors ------------------------------------------------
@@ -448,23 +801,50 @@ coordinates and is robust to layout shifts.
     /// a machine-readable <c>structuredContent</c> object that names the recovery tool
     /// (<see cref="RestartClient"/>) so the model can self-heal.
     /// </summary>
-    public static CallToolResult DownClientError(string clientId, string reason)
+    public static CallToolResult DownClientError(string clientId, string reason, ClientInfo? info = null)
     {
-        var text =
-            $"Client '{clientId}' {reason}. It cannot service tool calls right now. "
-            + $"Call {RestartClient} with {{ \"clientId\": \"{clientId}\" }} to bring it "
-            + $"back, or {SelectClient} a different one ({ListClients} shows live clients).";
+        // A remote client must NOT be told to restart itself: the hub cannot start a process
+        // on another machine, so following that advice wastes a call and teaches the model a
+        // recovery that never works. Wait for it to dial back in instead -- which is what
+        // actually happens, since the client reconnects with backoff on its own.
+        var isRemote = info?.IsRemote == true || info?.CanLaunch == false;
+
+        string text;
+        JsonObject recovery;
+        if (isRemote)
+        {
+            var where = info?.Host is { Length: > 0 } host ? $" on {host}" : string.Empty;
+            text =
+                $"Client '{clientId}' {reason}. It runs{where}, so the hub cannot restart it. "
+                + $"It reconnects on its own — call {WaitForClient} with "
+                + $"{{ \"appId\": \"{clientId}\" }} to block until it is back, or "
+                + $"{SelectClient} a different one ({ListClients} shows live clients).";
+            recovery = new JsonObject
+            {
+                ["tool"] = WaitForClient,
+                ["arguments"] = new JsonObject { ["appId"] = clientId, ["timeoutMs"] = 30000 },
+            };
+        }
+        else
+        {
+            text =
+                $"Client '{clientId}' {reason}. It cannot service tool calls right now. "
+                + $"Call {RestartClient} with {{ \"clientId\": \"{clientId}\" }} to bring it "
+                + $"back, or {SelectClient} a different one ({ListClients} shows live clients).";
+            recovery = new JsonObject
+            {
+                ["tool"] = RestartClient,
+                ["arguments"] = new JsonObject { ["clientId"] = clientId },
+            };
+        }
 
         var structured = new JsonObject
         {
             ["error"] = "client_unavailable",
             ["clientId"] = clientId,
             ["reason"] = reason,
-            ["recovery"] = new JsonObject
-            {
-                ["tool"] = RestartClient,
-                ["arguments"] = new JsonObject { ["clientId"] = clientId },
-            },
+            ["remote"] = isRemote,
+            ["recovery"] = recovery,
         };
 
         return new CallToolResult
@@ -513,6 +893,20 @@ coordinates and is robust to layout shifts.
         toolCount = c.Tools.Count,
         executablePath = c.ExecutablePath,
         lastSeenUtc = c.LastSeenUtc,
+
+        // Where this client actually is. Null host and "pipe" transport mean "on this
+        // machine", so a purely local setup reads exactly as it did before. canLaunch is
+        // surfaced so the model can see that hub_launch_client / hub_restart_client are not
+        // available for a remote client BEFORE trying and getting an error.
+        transport = c.Transport switch
+        {
+            ClientTransport.Pipe => "pipe",
+            ClientTransport.Tcp => "tcp",
+            ClientTransport.Relay => "relay",
+            _ => "unknown",
+        },
+        host = c.Host,
+        canLaunch = c.CanLaunch,
     };
 
     /// <summary>The set of currently-connected hub-ids, the live-membership source of truth for <c>connected</c>.</summary>
@@ -593,6 +987,26 @@ coordinates and is robust to layout shifts.
     public static JsonElement ClientIdSchema() =>
         JsonDocument.Parse(
             """{"type":"object","properties":{"clientId":{"type":"string","description":"The hub-assigned client id."}},"required":["clientId"]}""")
+            .RootElement.Clone();
+
+    public static JsonElement SetReadOnlySchema() =>
+        JsonDocument.Parse(
+            """{"type":"object","properties":{"clientId":{"type":"string","description":"The hub-assigned client id (e.g. myapp@MACHINENAME#1)."},"readOnly":{"type":"boolean","description":"true to refuse mutating tools, false to allow them."}},"required":["clientId","readOnly"]}""")
+            .RootElement.Clone();
+
+    public static JsonElement RemoteIssueSchema() =>
+        JsonDocument.Parse(
+            """{"type":"object","properties":{"target":{"type":"string","description":"The machine label this credential authenticates as. Becomes the '@host' in that client's id (e.g. myapp@MACHINENAME). Letters, digits, '.', '-' and '_' only."},"days":{"type":"integer","description":"Validity in days; the hub clamps it to its own maximum (365)."},"note":{"type":"string","description":"Recorded against the credential in hub_remote_status."},"outPath":{"type":"string","description":"Also write the bundle to this file, which is usually the easiest way to carry it to the other machine."}},"required":["target"]}""")
+            .RootElement.Clone();
+
+    public static JsonElement RemoteRevokeSchema() =>
+        JsonDocument.Parse(
+            """{"type":"object","properties":{"serial":{"type":"string","description":"The credential serial from hub_remote_status."}},"required":["serial"]}""")
+            .RootElement.Clone();
+
+    public static JsonElement RemoteEnableSchema() =>
+        JsonDocument.Parse(
+            """{"type":"object","properties":{"bindAddress":{"type":"string","description":"IP address to bind. 127.0.0.1 (default) is reachable only through an SSH tunnel or another forwarder; a specific interface address or 0.0.0.0 exposes it on the network, where mutual TLS is the only barrier."},"port":{"type":"integer","description":"TCP port to listen on (default 7423)."},"advertisedEndpoint":{"type":"string","description":"host:port baked into newly-issued credentials so clients know where to dial."}}}""")
             .RootElement.Clone();
 
     public static JsonElement WaitForClientSchema() =>

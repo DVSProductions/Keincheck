@@ -25,6 +25,9 @@
        and pulls in Keincheck.Client transitively. -->
   <ItemGroup>
     <ProjectReference Include="..\..\Keincheck.Avalonia\Keincheck.Avalonia.csproj" />
+    <!-- Opt-in remote transport. Present only because this sample demonstrates it; an app
+         that omits this reference links no networking code and cannot be reached remotely. -->
+    <ProjectReference Include="..\..\Keincheck.Remote\Keincheck.Remote.csproj" />
   </ItemGroup>
 
 </Project>

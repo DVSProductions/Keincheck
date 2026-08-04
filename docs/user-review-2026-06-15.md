@@ -1,7 +1,7 @@
 # Keincheck — User Review (2026-06-15)
 
 **Reviewer:** AI agent (Claude, via Claude Code MCP) driving a real task.
-**Scenario:** Inspect and optimize the UI of the *Animation Editor* window in `ProtoFaceAvalonia`
+**Scenario:** Inspect and optimize the UI of the *Animation Editor* window in `MyAppAvalonia`
 (Avalonia 12 / .NET 10), connected through the `keincheck-hub` MCP server (`keincheck-connect.exe`
 stdio bridge). Found a toolbar-overflow bug and a layers-panel spacing issue, fixed both in XAML,
 and verified the result — entirely through Keincheck plus one external fallback.
@@ -45,8 +45,8 @@ are standout features. The main rough edge is connection lifecycle during a rebu
    `hub_rebuild_client { csproj }` or "wait for client to reconnect" affordance would make the inner
    loop seamless.
 
-2. **One launch → two connected clients.** Starting a single `ProtoFaceAvalonia.exe` produced
-   *two* connected clients (`protoface#2` and `protoface#3`); a child/worker process appears to
+2. **One launch → two connected clients.** Starting a single `MyAppAvalonia.exe` produced
+   *two* connected clients (`myapp#2` and `myapp#3`); a child/worker process appears to
    register too. I had to call `list_windows` on each to find the one that actually owns the editor
    window. Suggestion: flag which client owns top-level windows, dedupe by window-owning PID, or let
    non-UI child processes opt out of registration.
@@ -83,7 +83,7 @@ are standout features. The main rough edge is connection lifecycle during a rebu
 Each finding was re-verified against the source before acting. Shipped in **v0.5.0**:
 
 - **#1 rebuild loop** — the "hub dies with the app" hypothesis was *false* (the hub is a standalone tray daemon; the 27 tools delist by design when the active client drops). Root cause was a missing **auto-reselect**: the broker never cleared `_active`, so a relaunched app's tools stayed delisted until a manual `hub_select_client`. Fixed — a reconnecting previously-active client now reclaims `active` automatically (a deliberate manual selection of a different client is respected). Added a **`hub_wait_for_client`** meta-tool to block until an app (re)connects.
-- **#2 duplicate clients** — confirmed bug: the hub minted a fresh suffix per `Register` with no PID dedup, and the client auto-reconnects. Fixed — a re-`Register` from the same `AppId`+PID reuses the same hub-id (stale session evicted). Added an **`ownsWindows`** flag to the client list so the AI can pick the UI-owner without probing each. (ProtoFace itself was clean — single `UseMcpClient`.)
+- **#2 duplicate clients** — confirmed bug: the hub minted a fresh suffix per `Register` with no PID dedup, and the client auto-reconnects. Fixed — a re-`Register` from the same `AppId`+PID reuses the same hub-id (stale session evicted). Added an **`ownsWindows`** flag to the client list so the AI can pick the UI-owner without probing each. (MyApp itself was clean — single `UseMcpClient`.)
 - **#3 stale `connected`** — already forced false in code; hardened the projection to recompute `connected` from live membership so it can never drift.
 - **#4 `.class` selector** — confirmed gap: it was advertised in the hub guide but unimplemented. Implemented over Avalonia `StyleClasses` (via a defaulted `IUiAdapter.GetClasses`; `.toolGroup`, `Type.class`, `.a.b`, `.class[Attr=v]`). Reconciled the guide — `.class` is now real; the also-unimplemented `:contains`/`:nth` claims were removed.
 - **#5 selector/handle ergonomics** — confirmed bug: `handle`/`selector` lacked defaults so MCP marked them required. Reordered so `set_property`/`automation_action`/`set_focus` no longer force the unused discriminator.

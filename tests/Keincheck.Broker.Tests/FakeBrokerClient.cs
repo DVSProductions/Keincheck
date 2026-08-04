@@ -145,13 +145,29 @@ internal sealed class FakeBrokerClient : IAsyncDisposable
         catch (IOException) { /* transport torn down */ }
     }
 
+    /// <summary>
+    /// How long teardown will wait on the transport before giving up on it.
+    /// </summary>
+    /// <remarks>
+    /// Both waits below were unbounded, and disposing a pipe stream that has a read pending can
+    /// block on Windows. Bounding them is insurance rather than a fix for any known hang: the
+    /// point is that teardown is the worst place to block, because it yields no failure, no
+    /// output and no clue — just a testhost at ~0% CPU until the runner abandons the whole run.
+    /// </remarks>
+    private static readonly TimeSpan TeardownBudget = TimeSpan.FromSeconds(10);
+
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
         _cts.Cancel();
-        await _channel.DisposeAsync().ConfigureAwait(false);
-        try { await _receiveLoop.ConfigureAwait(false); } catch { /* ignore */ }
+
+        try { await _channel.DisposeAsync().AsTask().WaitAsync(TeardownBudget).ConfigureAwait(false); }
+        catch { /* already torn down, or refusing to */ }
+
+        try { await _receiveLoop.WaitAsync(TeardownBudget).ConfigureAwait(false); }
+        catch { /* cancelled, faulted, or refused to stop */ }
+
         _cts.Dispose();
     }
 }

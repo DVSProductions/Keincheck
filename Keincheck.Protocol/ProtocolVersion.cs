@@ -12,7 +12,15 @@ public static class ProtocolVersion
     /// The current protocol version. Bump this whenever the DTO shapes, the
     /// framing format, or the handshake semantics change incompatibly.
     /// </summary>
-    public const int Current = 1;
+    /// <remarks>
+    /// v2 adds the remote-session handshake (<see cref="MessageKind.Hello"/> /
+    /// <see cref="MessageKind.Welcome"/> / <see cref="MessageKind.Rejected"/>), credential
+    /// enrollment over the control pipe, Brotli frame compression, and
+    /// <see cref="ToolDescriptor.ReadOnly"/>. All of it is additive: a v1 client that
+    /// registers on the pipe without ever sending a Hello behaves exactly as before, which
+    /// is why <see cref="Minimum"/> stays at 1.
+    /// </remarks>
+    public const int Current = 2;
 
     /// <summary>
     /// The lowest protocol version this build can still speak. The hub accepts a

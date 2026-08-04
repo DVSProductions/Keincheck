@@ -27,7 +27,7 @@ public class MessageRoundTripTests
         var msg = new RegisterMessage
         {
             ClientId = "client-abc",
-            DisplayName = "ProtoFace (pid 1234)",
+            DisplayName = "MyApp (pid 1234)",
             ProcessId = 1234,
             ProtocolVersion = ProtocolVersion.Current,
         };

@@ -104,19 +104,20 @@ internal sealed class PipeBrokerHarness : IAsyncDisposable
     {
         ClientSession session;
         bool readOnly;
+        IReadOnlyList<ToolDescriptor> tools;
         lock (_gate)
         {
             if (!_sessions.TryGetValue(clientId, out var s) || !_known.TryGetValue(clientId, out var info) || !info.IsConnected)
                 throw new InvalidOperationException($"Client '{clientId}' is not connected.");
             session = s;
             readOnly = info.ReadOnly;
+            tools = info.Tools;
         }
 
-        // Read-only gate: refuse a mutating tool before it ever hits the wire. The
-        // production broker derives mutating-ness from the tool's annotations; the
-        // harness uses the same read-only inspection/screenshot heuristic the client
-        // applies so the rejection is symmetric.
-        if (readOnly && IsMutatingTool(toolName))
+        // Read-only gate: refuse a mutating tool before it ever hits the wire, using the
+        // client's own declared classification where it gave one — same rule, same
+        // precedence, as the production broker.
+        if (readOnly && IsMutatingTool(toolName, tools))
             throw new InvalidOperationException($"Client '{clientId}' is read-only; '{toolName}' is refused.");
 
         var correlationId = Guid.NewGuid().ToString("N");
@@ -316,14 +317,31 @@ internal sealed class PipeBrokerHarness : IAsyncDisposable
     }
 
     /// <summary>
-    /// Same read-only classification the client applies: <c>get_*</c>, the well-known
-    /// read-only inspection tools, and <c>screenshot_*</c> are non-mutating; everything
-    /// else mutates. Kept identical so the broker-side and client-side gates agree.
+    /// Same read-only classification the production broker applies, kept identical so the
+    /// broker-side and client-side gates agree: the client's declared
+    /// <see cref="ToolDescriptor.ReadOnly"/> wins, and the name heuristic
+    /// (<c>get_*</c> / the well-known inspection tools / <c>screenshot_*</c>) is only the
+    /// fallback for clients that did not declare one. Fail-closed either way.
     /// </summary>
-    internal static bool IsMutatingTool(string name) => !(
-        name.StartsWith("get_", StringComparison.Ordinal)
-        || name is "list_windows" or "query_controls" or "hit_test" or "wait_for"
-        || name.StartsWith("screenshot_", StringComparison.Ordinal));
+    internal static bool IsMutatingTool(string name, IReadOnlyList<ToolDescriptor>? tools = null)
+    {
+        if (tools is not null)
+        {
+            foreach (var tool in tools)
+            {
+                if (!string.Equals(tool.Name, name, StringComparison.Ordinal))
+                    continue;
+                if (tool.ReadOnly is { } declared)
+                    return !declared;
+                break;
+            }
+        }
+
+        return !(
+            name.StartsWith("get_", StringComparison.Ordinal)
+            || name is "list_windows" or "query_controls" or "hit_test" or "wait_for"
+            || name.StartsWith("screenshot_", StringComparison.Ordinal));
+    }
 
     public async ValueTask DisposeAsync()
     {
@@ -338,8 +356,13 @@ internal sealed class PipeBrokerHarness : IAsyncDisposable
             sessions = _sessions.Values.ToList();
             _sessions.Clear();
         }
+        // Bounded for the same reason as the accept loop below: disposing a pipe channel with a
+        // read pending can block, and one stuck session must not take the process with it.
         foreach (var s in sessions)
-            await s.Channel.DisposeAsync().ConfigureAwait(false);
+        {
+            try { await s.Channel.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false); }
+            catch { /* already torn down, or refusing to */ }
+        }
 
         // Unblock the accept loop, which is parked in WaitForConnectionAsync, by poking
         // the pipe with a throwaway client connect. Cancellation handles the rest.
@@ -350,7 +373,14 @@ internal sealed class PipeBrokerHarness : IAsyncDisposable
         }
         catch { /* the loop may already be torn down */ }
 
-        try { await _acceptLoop.ConfigureAwait(false); } catch { /* ignore */ }
+        // Bounded as insurance, not as a fix. Cancellation is plumbed into
+        // WaitForConnectionAsync and the poke above is a second release path, so this should
+        // return immediately. The bound exists because teardown is the worst place to block:
+        // it produces no test failure, no output and no clue -- just a testhost sitting at ~0%
+        // CPU until the outer runner gives up on the whole run. Cap it and move on.
+        try { await _acceptLoop.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false); }
+        catch { /* cancelled, faulted, or refused to stop */ }
+
         _cts.Dispose();
     }
 

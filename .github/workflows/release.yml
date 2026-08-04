@@ -32,10 +32,15 @@ jobs:
         shell: bash
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      # -p:Version makes the TAG authoritative for the assembly version, not just for the
+      # Velopack package name. Without it the hub reported whatever Directory.Build.props
+      # happened to say, so tagging without bumping props shipped a release whose installer
+      # said one version and whose tray, hub_status and update check said another.
       - name: Publish Hub (self-contained, win-x64, ReadyToRun for faster startup)
         run: >
           dotnet publish Keincheck.Hub/Keincheck.Hub.csproj
-          -c Release -r win-x64 --self-contained true -p:PublishReadyToRun=true -o publish
+          -c Release -r win-x64 --self-contained true -p:PublishReadyToRun=true
+          -p:Version=${{ steps.ver.outputs.version }} -o publish
 
       - name: Publish the shim (Native AOT) and co-locate it with the hub
         # keincheck-connect.exe must ship alongside the hub: it is the stdio bridge the AI's

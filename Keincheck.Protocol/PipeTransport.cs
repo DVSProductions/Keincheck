@@ -88,6 +88,18 @@ public static class PipeTransport
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            // The deadline is checked OUT HERE, and that placement is the whole point.
+            //
+            // This throw used to live inside the try below, where `catch (TimeoutException)`
+            // — there to retry a pipe that is not listening yet — caught the method's own
+            // give-up signal. Past the deadline every iteration therefore threw, self-caught,
+            // slept 500ms and went round again: ConnectAsync never returned and never threw,
+            // for any timeout, forever, at ~0% CPU. A caller that asked to wait ten seconds
+            // waited for the life of the process instead.
+            var remaining = deadline - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+                throw new TimeoutException($"No Keincheck hub on pipe '{pipeName}' within the timeout.");
+
             var client = new NamedPipeClientStream(
                 ".",
                 pipeName,
@@ -95,13 +107,6 @@ public static class PipeTransport
                 PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
             try
             {
-                var remaining = deadline - DateTime.UtcNow;
-                if (remaining <= TimeSpan.Zero)
-                {
-                    await client.DisposeAsync().ConfigureAwait(false);
-                    throw new TimeoutException($"No Keincheck hub on pipe '{pipeName}' within the timeout.");
-                }
-
                 // ConnectAsync(int) treats the value as a one-shot wait; we wrap our
                 // own backoff loop so a not-yet-listening pipe retries cleanly.
                 var attemptMs = (int)Math.Min(remaining.TotalMilliseconds, 250);

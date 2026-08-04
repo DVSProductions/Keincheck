@@ -165,6 +165,20 @@ public sealed class HubMcpServer : IAsyncDisposable
         {
             foreach (var d in active.Tools)
             {
+                // A client's tool catalog is entirely client-authored, so it can contain a
+                // name that collides with one of the hub's own. Dispatch is already safe —
+                // IsMetaTool is checked first, so the real meta-tool always runs — but
+                // advertising the duplicate is both an MCP protocol violation and a way to put
+                // an attacker-written description for, say, hub_remote_issue into the model's
+                // context. Skip the shadow instead.
+                if (!_options.QualifyToolNames && HubMetaTools.IsMetaTool(d.Name))
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"[Hub] client '{active.ClientId}' advertises '{d.Name}', which collides " +
+                        "with a hub meta-tool; not advertising it.");
+                    continue;
+                }
+
                 var name = _options.QualifyToolNames ? $"{active.ClientId}.{d.Name}" : d.Name;
                 tools.Add(new Tool
                 {
@@ -256,8 +270,11 @@ public sealed class HubMcpServer : IAsyncDisposable
 
         // A call to a down/unknown client returns a structured error that names the
         // recovery tool instead of a raw transport failure.
-        if (_broker.ClientStatus(targetId) is not { IsConnected: true })
-            return HubMetaTools.DownClientError(targetId, "is not connected");
+        // Pass the snapshot so the recovery hint fits the client: a remote one cannot be
+        // restarted by the hub, so telling the model to try would be actively misleading.
+        var known = _broker.ClientStatus(targetId);
+        if (known is not { IsConnected: true })
+            return HubMetaTools.DownClientError(targetId, "is not connected", known);
 
         var toolName = StripQualifier(name, targetId);
 
@@ -293,9 +310,10 @@ public sealed class HubMcpServer : IAsyncDisposable
         catch (Exception ex)
         {
             // Most likely the client dropped mid-call — point the AI at recovery.
-            return _broker.ClientStatus(targetId) is { IsConnected: true }
+            var status = _broker.ClientStatus(targetId);
+            return status is { IsConnected: true }
                 ? HubMetaTools.ErrorResult($"Invoke failed on '{targetId}': {ex.Message}")
-                : HubMetaTools.DownClientError(targetId, $"dropped during the call ({ex.Message})");
+                : HubMetaTools.DownClientError(targetId, $"dropped during the call ({ex.Message})", status);
         }
     }
 
@@ -560,7 +578,11 @@ public sealed class HubMcpServer : IAsyncDisposable
         // (a) qualified name carries the client id.
         if (_options.QualifyToolNames)
         {
-            var dot = toolName.IndexOf('.');
+            // The LAST dot, not the first: a remote client id embeds a host name, which may
+            // itself contain dots (myapp@build.ci#1.get_logical_tree). Tool names never
+            // contain a dot, so splitting from the right is unambiguous where splitting from
+            // the left would truncate the client id to 'myapp@build'.
+            var dot = toolName.LastIndexOf('.');
             if (dot > 0)
                 return (toolName[..dot], args);
         }
@@ -582,6 +604,8 @@ public sealed class HubMcpServer : IAsyncDisposable
         _options.QualifyToolNames && name.StartsWith(clientId + ".", StringComparison.Ordinal)
             ? name[(clientId.Length + 1)..]
             : name;
+    // Note: this one is already correct for dotted client ids, because it matches the full
+    // client id as a prefix rather than searching for a separator.
 
     // ---- list_changed -----------------------------------------------------
 

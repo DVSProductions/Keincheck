@@ -61,16 +61,29 @@ public sealed class BrokerClient : IAsyncDisposable
 
     private async Task RunAsync(CancellationToken ct)
     {
+        // Whatever transport was configured is the ONLY one tried. A remote client that
+        // quietly fell back to the local pipe would attach the operator to the wrong machine
+        // while the tool surface looked completely normal.
+        var connector = _options.Connector
+            ?? new PipeChannelConnector(_options.PipeName, _options.ConnectTimeout);
+        var context = new ChannelConnectContext
+        {
+            AppId = _clientId,
+            ClientVersion = ClientAssemblyVersion,
+            HeartbeatInterval = _options.HeartbeatInterval,
+        };
+
         var backoff = TimeSpan.FromMilliseconds(250);
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                await using var channel = await PipeTransport.ConnectAsync(
-                    _options.PipeName, _options.ConnectTimeout, ct).ConfigureAwait(false);
+                var session = await connector.ConnectAsync(context, ct).ConfigureAwait(false);
+                await using var channel = session.Channel;
 
                 backoff = TimeSpan.FromMilliseconds(250); // reset after a good connect
-                await ServeAsync(channel, ct).ConfigureAwait(false);
+                await ServeAsync(channel, session.ReadTimeout, connector.AdvertisedProtocolVersion, ct)
+                    .ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -78,7 +91,18 @@ public sealed class BrokerClient : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"[Keincheck.Client] session ended: {ex.Message}");
+                Report($"session to {connector.Describe()} ended: {ex.Message}");
+
+                // Some refusals will never succeed however long we wait — a revoked or expired
+                // credential, an unsupported protocol version. Retrying those is not
+                // resilience, it is a hot loop: a full TCP + mutual-TLS handshake every few
+                // seconds, forever, each one logged hub-side as an authentication failure.
+                // Stop, and say why, rather than hammering a door that is never opening.
+                if (IsPermanentRefusal(ex, out var reason))
+                {
+                    Report($"giving up: {reason}");
+                    break;
+                }
             }
 
             if (!_options.AutoReconnect || ct.IsCancellationRequested)
@@ -90,7 +114,8 @@ public sealed class BrokerClient : IAsyncDisposable
         }
     }
 
-    private async Task ServeAsync(PipeChannel channel, CancellationToken ct)
+    private async Task ServeAsync(
+        PipeChannel channel, TimeSpan? readTimeout, int protocolVersion, CancellationToken ct)
     {
         // 1. Register.
         await channel.SendAsync(MessageKind.Register, new RegisterMessage
@@ -98,7 +123,11 @@ public sealed class BrokerClient : IAsyncDisposable
             ClientId = _clientId,
             DisplayName = _displayName,
             ProcessId = Environment.ProcessId,
-            ProtocolVersion = ProtocolVersion.Current,
+            // The transport decides. On the pipe this is v1: nothing in a pipe session uses a
+            // v2 feature, and claiming v2 would make an OLDER hub drop the connection with no
+            // explanation -- turning a client-package update into a silent outage for anyone
+            // whose hub had not auto-updated yet.
+            ProtocolVersion = protocolVersion,
             OwnsWindows = await OwnsWindowsAsync(ct).ConfigureAwait(false),
             ClientVersion = ClientAssemblyVersion,
         }, cancellationToken: ct).ConfigureAwait(false);
@@ -121,12 +150,15 @@ public sealed class BrokerClient : IAsyncDisposable
         {
             while (!ct.IsCancellationRequested)
             {
-                var envelope = await channel.ReceiveAsync(ct).ConfigureAwait(false);
+                var envelope = await ReceiveAsync(channel, readTimeout, ct).ConfigureAwait(false);
                 if (envelope is null)
                     break; // hub closed the connection
 
                 if (envelope.Kind == MessageKind.InvokeTool)
                     _ = HandleInvokeAsync(channel, envelope, ct);
+
+                // Heartbeat / Welcome / anything else: receiving it at all is the liveness
+                // signal, which is the whole point of the read deadline below.
             }
         }
         finally
@@ -152,6 +184,63 @@ public sealed class BrokerClient : IAsyncDisposable
                 }
                 catch { /* channel may already be dead — ignore */ }
             }
+        }
+    }
+
+    /// <summary>Surfaces a diagnostic to the app's log hook, and always to Debug.</summary>
+    private void Report(string message)
+    {
+        Debug.WriteLine($"[Keincheck.Client] {message}");
+        try { _options.Log?.Invoke(message); } catch { /* a logging hook must never break the client */ }
+    }
+
+    /// <summary>
+    /// Whether a failure means reconnecting can never succeed until something changes
+    /// out-of-band, in which case the client stops instead of looping.
+    /// </summary>
+    private static bool IsPermanentRefusal(Exception ex, out string reason)
+    {
+        // Unwrap: the transport may have wrapped the refusal on its way out.
+        for (Exception? e = ex; e is not null; e = e.InnerException)
+        {
+            if (e is ChannelConnectRefusedException { IsPermanent: true } refused)
+            {
+                reason = refused.Message;
+                return true;
+            }
+        }
+
+        reason = string.Empty;
+        return false;
+    }
+
+    /// <summary>
+    /// Reads one message, optionally bounded by an idle deadline.
+    /// </summary>
+    /// <remarks>
+    /// On a pipe <paramref name="readTimeout"/> is null and this is a plain receive: a dead
+    /// hub closes the pipe and we see EOF at once. On a network transport there is no such
+    /// signal — a black-holed TCP connection is indistinguishable from a quiet one, so
+    /// without a deadline a client whose link died mid-session would sit on a socket that is
+    /// never going to answer, invisible to both ends. Timing out here drops into the
+    /// reconnect loop, which is exactly the right behaviour for a roaming target.
+    /// </remarks>
+    private static async Task<MessageEnvelope?> ReceiveAsync(
+        PipeChannel channel, TimeSpan? readTimeout, CancellationToken ct)
+    {
+        if (readTimeout is not { } timeout)
+            return await channel.ReceiveAsync(ct).ConfigureAwait(false);
+
+        using var idle = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        idle.CancelAfter(timeout);
+        try
+        {
+            return await channel.ReceiveAsync(idle.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (idle.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            throw new TimeoutException(
+                $"No message from the hub within {timeout.TotalSeconds:0.#}s; treating the link as dead.");
         }
     }
 

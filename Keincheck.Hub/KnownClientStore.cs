@@ -11,8 +11,26 @@ namespace Keincheck.Hub;
 /// </summary>
 public sealed record KnownClientProfile
 {
-    /// <summary>The app's stable self-reported id (the persistence key).</summary>
+    /// <summary>
+    /// The persistence key: the app's self-reported id for a local app, or
+    /// <c>AppId@Host</c> for one on another machine.
+    /// </summary>
+    /// <remarks>
+    /// Remote entries are keyed by app-and-host, never by the bare app id. A shared key would
+    /// make lifting read-only on the remote machine silently do the same to the copy running on this
+    /// desk — the two are different machines that happen to run the same program.
+    /// </remarks>
     public required string AppId { get; init; }
+
+    /// <summary>
+    /// The machine this entry belongs to, or null for a local app.
+    /// </summary>
+    /// <remarks>
+    /// Load-bearing on restore, not decorative: it is what tells the seeding pass that a
+    /// remembered entry describes a machine the hub cannot launch a process on. Without it a
+    /// restored remote entry would look local and defeat the launch guard.
+    /// </remarks>
+    public string? Host { get; init; }
 
     /// <summary>The friendly name last reported by the app.</summary>
     public string? DisplayName { get; init; }

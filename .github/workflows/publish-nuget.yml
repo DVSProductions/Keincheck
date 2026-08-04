@@ -46,7 +46,7 @@ jobs:
       - name: Pack the library packages
         shell: bash
         run: |
-          for proj in Keincheck.Protocol Keincheck.Core Keincheck.Client Keincheck.Avalonia Keincheck.Wpf Keincheck; do
+          for proj in Keincheck.Protocol Keincheck.Core Keincheck.Client Keincheck.Avalonia Keincheck.Wpf Keincheck.Remote Keincheck; do
             dotnet pack "$proj/$proj.csproj" -c Release -o artifacts/nupkg ${{ steps.ver.outputs.arg }}
           done
 

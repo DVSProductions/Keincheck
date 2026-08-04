@@ -89,6 +89,65 @@ public interface IClientBroker
     event EventHandler<ClientInfo>? ClientDown;
 }
 
+/// <summary>How a client is attached to the hub.</summary>
+public enum ClientTransport
+{
+    /// <summary>The local control pipe — same machine, same user. The default and fast path.</summary>
+    Pipe = 0,
+
+    /// <summary>A mutually-authenticated TLS socket, possibly through an SSH tunnel.</summary>
+    Tcp = 1,
+
+    /// <summary>Reserved for a future dial-out rendezvous. Not implemented.</summary>
+    Relay = 2,
+}
+
+/// <summary>
+/// What the listener established about a session before the client said a word — the facts
+/// the client is not permitted to assert about itself.
+/// </summary>
+/// <remarks>
+/// Everything here comes from the connection, not from <see cref="RegisterMessage"/>. That
+/// separation is the point: <see cref="Host"/> is the common name of a certificate the hub
+/// validated, so a remote client cannot claim to be a different machine, and
+/// <see cref="CanLaunch"/> is decided by the transport rather than inferred later from an id.
+/// </remarks>
+public sealed record ClientSessionContext
+{
+    /// <summary>The local-pipe context: same machine, launchable, not read-only by default.</summary>
+    public static readonly ClientSessionContext LocalPipe = new() { Transport = ClientTransport.Pipe };
+
+    /// <summary>How this client is attached.</summary>
+    public required ClientTransport Transport { get; init; }
+
+    /// <summary>
+    /// The authoritative host label, from the validated client certificate; null for the
+    /// local pipe. Remote clients are filed as <c>AppId@Host#n</c>.
+    /// </summary>
+    public string? Host { get; init; }
+
+    /// <summary>The machine name the client reported. Informational only — self-reported, so not trusted.</summary>
+    public string? MachineId { get; init; }
+
+    /// <summary>The peer's network address, for the audit trail. Always loopback over a tunnel.</summary>
+    public string? PeerAddress { get; init; }
+
+    /// <summary>
+    /// Whether this client starts read-only. True for remote: "look at the remote machine" is always
+    /// safe, and "drive the remote machine" should be a deliberate act.
+    /// </summary>
+    public bool ReadOnlyDefault { get; init; }
+
+    /// <summary>
+    /// Whether the hub may start or restart this client's process. False for remote — the
+    /// process is on another machine.
+    /// </summary>
+    public bool CanLaunch { get; init; } = true;
+
+    /// <summary>True for anything that is not the local pipe.</summary>
+    public bool IsRemote => Transport != ClientTransport.Pipe;
+}
+
 /// <summary>
 /// A snapshot of a client's state in the hub registry. Immutable record passed to
 /// the MCP server and surfaced in the tray UI.
@@ -136,4 +195,35 @@ public sealed record ClientInfo
 
     /// <summary>UTC time of the last heartbeat or message from this client.</summary>
     public DateTimeOffset LastSeenUtc { get; init; }
+
+    /// <summary>How this client is attached. <see cref="ClientTransport.Pipe"/> for local apps.</summary>
+    public ClientTransport Transport { get; init; } = ClientTransport.Pipe;
+
+    /// <summary>
+    /// The machine this client runs on, for remote clients; null for local ones.
+    /// </summary>
+    /// <remarks>
+    /// Taken from the common name of the certificate the hub validated — never self-reported,
+    /// and never derived from the peer address, which is always loopback when the session
+    /// arrives through an SSH tunnel. It is what makes <c>myapp@MACHINENAME</c> mean
+    /// something.
+    /// </remarks>
+    public string? Host { get; init; }
+
+    /// <summary>The machine name the client reported about itself. Informational only.</summary>
+    public string? MachineId { get; init; }
+
+    /// <summary>
+    /// Whether the hub can launch or restart this client's process.
+    /// </summary>
+    /// <remarks>
+    /// False for remote clients: the process is on another machine. It is a stored fact rather
+    /// than something re-derived from the id, because the failure it prevents — starting a
+    /// <i>local</i> copy of an app while the operator believes they restarted the remote one —
+    /// is both silent and the worst outcome in this design.
+    /// </remarks>
+    public bool CanLaunch { get; init; } = true;
+
+    /// <summary>True when this client is attached over something other than the local pipe.</summary>
+    public bool IsRemote => Transport != ClientTransport.Pipe;
 }

@@ -9,7 +9,7 @@ using Avalonia.Media.Immutable;
 namespace Keincheck.Demo;
 
 /// <summary>
-/// A small custom-drawn control (analogous to ProtoFace's vertex adorner layer)
+/// A small custom-drawn control (analogous to MyApp's vertex adorner layer)
 /// that paints a set of draggable vertex handles by overriding <see cref="Render"/>
 /// and moves them with raw pointer events. It deliberately exposes <b>no</b>
 /// automation peer (see <see cref="OnCreateAutomationPeer"/>), so it is the

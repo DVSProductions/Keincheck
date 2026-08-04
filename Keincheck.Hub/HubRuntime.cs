@@ -16,6 +16,13 @@ public static class HubRuntime
     /// <summary>The MCP server, once started.</summary>
     public static HubMcpServer? Mcp => _mcp;
 
+    /// <summary>
+    /// The remote-access facility, when the hub build has one. Null in tests and in any host
+    /// that never constructed it — the <c>hub_remote_*</c> meta-tools then report remote as
+    /// unavailable rather than failing.
+    /// </summary>
+    public static Remote.RemoteAccess? Remote { get; set; }
+
     /// <summary>Starts the MCP servers around <paramref name="broker"/>.</summary>
     public static void Start(IClientBroker broker, HubOptions options)
     {
