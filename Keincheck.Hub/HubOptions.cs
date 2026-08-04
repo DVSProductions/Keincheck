@@ -37,6 +37,17 @@ public sealed class HubOptions
     public bool QualifyToolNames { get; set; }
 
     /// <summary>
+    /// When true (default), the hub advertises the <b>active client's</b> tools directly
+    /// and emits <c>notifications/tools/list_changed</c> whenever the catalog changes
+    /// (selection, connect, drop). MCP clients that do not handle dynamic tool additions
+    /// never see those tools, so when false the hub serves a <b>static catalog</b>
+    /// instead: only the meta-tools (including <c>hub_call_tool</c>, the generic proxy)
+    /// are listed, the <c>listChanged</c> capability is not advertised, and no
+    /// list-changed notifications are emitted.
+    /// </summary>
+    public bool DynamicTooling { get; set; } = true;
+
+    /// <summary>
     /// When true, an <i>installed</i> hub polls GitHub for a newer release and applies it
     /// automatically — but only while no client is connected, so an AI session is never
     /// interrupted. A no-op for dev / non-Velopack-installed runs. Default true.

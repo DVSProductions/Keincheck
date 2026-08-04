@@ -114,6 +114,7 @@ returns the whole workflow as a document the model can read before touching anyt
 | *Lifecycle* | `hub_launch_client`, `hub_restart_client` |
 | *Permissions* | `hub_set_readonly` — allow or refuse mutating tools per client |
 | *Record & replay* | `hub_record_start`, `hub_record_stop`, `hub_record_status`, `hub_replay`, `hub_export_test` |
+| *Static tooling* | `hub_list_client_tools`, `hub_call_tool` — discover and call a client's tools by name, for agents that don't support dynamic tool lists |
 | *[Remote](#remote)* | `hub_remote_status`, `hub_remote_enable`, `hub_remote_disable`, `hub_remote_issue`, `hub_remote_revoke` |
 
 Remote adds **no new tools for driving** — a remote app is addressed and driven exactly like a

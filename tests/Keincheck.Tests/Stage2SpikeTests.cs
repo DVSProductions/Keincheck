@@ -148,9 +148,11 @@ public sealed class Stage2SpikeTests
         });
         broker.ActiveClientId = "app1";
 
-        // Start the hub MCP server (Mechanic #2) but DON'T start its HTTP host here;
-        // we only use its dynamic handler wiring over a stream (Mechanic #3).
-        var options = new HubOptions { ServeMcpOverPipe = false };
+        // Start the hub MCP server (Mechanic #2) but DON'T serve its HTTP endpoint here
+        // (HttpPort 0 = ephemeral); we only use its dynamic handler wiring over a stream
+        // (Mechanic #3). An ephemeral port also keeps the test green while a real hub
+        // daemon holds the default 3100.
+        var options = new HubOptions { ServeMcpOverPipe = false, HttpPort = 0 };
         await using var hub = HubMcpServer.Start(broker, options);
         try
         {
