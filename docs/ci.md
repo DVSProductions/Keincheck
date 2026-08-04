@@ -46,8 +46,8 @@ vpk pack -u Keincheck.Hub -v 0.11.0 -p publish -e Keincheck.Hub.exe --packTitle 
 ```
 
 That stops short of `vpk upload`, which is what the workflow does with its own token. Copying
-the shim into `publish/` is not optional — the hub's "Set up in Claude" points Claude at the
-co-located `keincheck-connect.exe`, and `e2e.yml` asserts it is there.
+the shim into `publish/` is not optional — the hub's "Set up AI assistant" points the client at
+the co-located `keincheck-connect.exe`, and `e2e.yml` asserts it is there.
 
 ## What the E2E job actually does
 
@@ -64,11 +64,11 @@ The E2E job covers exactly that gap:
    install genuinely does poll GitHub.
 3. **Asserts the installed layout**: `current\Keincheck.Hub.exe`,
    `current\keincheck-connect.exe`, `Update.exe`. Nothing else checks that the shim is
-   co-located, and the hub's "Set up in Claude" depends on it.
+   co-located, and the hub's "Set up AI assistant" depends on it.
 4. **Builds and runs** both demo apps and a throwaway consumer built from locally packed
    NuGet packages.
-5. **Drives everything through `keincheck-connect.exe` over stdio** — the exact path Claude
-   Code and Claude Desktop take.
+5. **Drives everything through `keincheck-connect.exe` over stdio** — the exact path an MCP
+   client takes, whichever assistant the hub was set up for.
 
 The scenario, in order: handshake → `hub_status`/`hub_guide` with nothing attached →
 `tools/list` is meta-only → the demo attaches → discovery → `tools/list` gains the client's
