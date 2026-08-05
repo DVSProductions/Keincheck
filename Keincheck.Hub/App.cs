@@ -16,13 +16,15 @@ namespace Keincheck.Hub;
 public sealed class App : Application
 {
     private readonly PipeClientBroker _broker;
+    private readonly HubSettings _settings;
     private HubViewModel? _vm;
     private HubWindow? _window;
     private TrayIcon? _tray;
 
-    public App(PipeClientBroker broker)
+    public App(PipeClientBroker broker, HubSettings? settings = null)
     {
         _broker = broker;
+        _settings = settings ?? HubSettings.Open();
     }
 
     public override void Initialize()
@@ -73,7 +75,8 @@ public sealed class App : Application
         var menu = new NativeMenu();
         menu.Add(open);
         menu.Add(new NativeMenuItemSeparator());
-        menu.Add(BuildClaudeSetupMenu());
+        menu.Add(BuildAgentSetupMenu());
+        menu.Add(BuildStartAtLoginItem());
 
         // Only offered when this hub was built with remote support. Opening the panel does
         // not enable anything; it is where an operator turns the listener on and issues the
@@ -107,9 +110,9 @@ public sealed class App : Application
         _window.WindowState = WindowState.Normal;
         _window.Activate();
 
-        // The first time the user opens the window, offer to wire Keincheck into Claude
-        // (once, marker-gated). Deferred to here — never on launch — so the hub stays
-        // tray-only until intentionally opened.
+        // The first time the user opens the window, offer to wire Keincheck into their AI
+        // client (once, marker-gated). Deferred to here — never on launch — so the hub
+        // stays tray-only until intentionally opened.
         Dispatcher.UIThread.Post(TryOfferFirstRunSetup, DispatcherPriority.Background);
     }
 
@@ -132,57 +135,90 @@ public sealed class App : Application
         _remoteWindow.Activate();
     }
 
-    /// <summary>The "Set up in Claude ▸ …" tray submenu — re-runnable, registers the MCP server.</summary>
-    private NativeMenuItem BuildClaudeSetupMenu()
+    /// <summary>The "Set up AI assistant ▸ …" tray submenu — re-runnable, registers the MCP server.</summary>
+    private NativeMenuItem BuildAgentSetupMenu()
     {
         var submenu = new NativeMenu();
 
         var code = new NativeMenuItem("Claude Code");
-        code.Click += (_, _) => SetupClaude(ClaudeTarget.Code);
+        code.Click += (_, _) => SetupAgents(AgentTarget.ClaudeCode);
 
         var desktopItem = new NativeMenuItem("Claude Desktop");
-        desktopItem.Click += (_, _) => SetupClaude(ClaudeTarget.Desktop);
+        desktopItem.Click += (_, _) => SetupAgents(AgentTarget.ClaudeDesktop);
 
-        var both = new NativeMenuItem("Both");
-        both.Click += (_, _) => SetupClaude(ClaudeTarget.Code, ClaudeTarget.Desktop);
+        var kimi = new NativeMenuItem("Kimi Code");
+        kimi.Click += (_, _) => SetupAgents(AgentTarget.KimiCode);
+
+        var all = new NativeMenuItem("All");
+        all.Click += (_, _) => SetupAgents(AgentTarget.ClaudeCode, AgentTarget.ClaudeDesktop, AgentTarget.KimiCode);
 
         submenu.Add(code);
         submenu.Add(desktopItem);
-        submenu.Add(both);
+        submenu.Add(kimi);
+        submenu.Add(all);
 
-        return new NativeMenuItem("Set up in Claude") { Menu = submenu };
+        return new NativeMenuItem("Set up AI assistant") { Menu = submenu };
     }
 
-    private void SetupClaude(params ClaudeTarget[] targets)
+    /// <summary>
+    /// The login-startup toggle. Opting out only skips the registration — the
+    /// keincheck-connect shim still launches the hub on demand when an AI connects.
+    /// </summary>
+    private NativeMenuItem BuildStartAtLoginItem()
     {
-        var connectExe = ClaudeMcpSetup.ResolveConnectExe();
+        var item = new NativeMenuItem("Start hub at login")
+        {
+            ToggleType = MenuItemToggleType.CheckBox,
+            IsChecked = _settings.StartAtLogin,
+        };
+        item.Click += (_, _) =>
+        {
+            // Settings are the source of truth (some platforms auto-toggle IsChecked before
+            // Click, some don't), then the checkbox is forced back to it.
+            var enable = !_settings.StartAtLogin;
+            _settings.SetStartAtLogin(enable);
+            if (enable)
+                StartupRegistration.TryRegister();
+            else
+                StartupRegistration.TryUnregister();
+            item.IsChecked = enable;
+        };
+        return item;
+    }
+
+    private void SetupAgents(params AgentTarget[] targets)
+    {
+        var connectExe = AgentMcpSetup.ResolveConnectExe();
         if (connectExe is null)
         {
-            ClaudeSetupUi.ShowNote("Keincheck",
+            AgentSetupUi.ShowNote("Keincheck",
                 "Could not locate keincheck-connect.exe. Set the KEINCHECK_CONNECT_EXE environment " +
                 "variable to its full path, or reinstall the hub so the bridge is co-located.");
             return;
         }
-        ClaudeSetupUi.RunAndShowResult(targets, connectExe);
+        AgentSetupUi.RunAndShowResult(targets, connectExe);
     }
 
     /// <summary>
-    /// On first run, offer to register Keincheck in Claude — but only once (a marker file), and
-    /// only when it is not already configured anywhere. Best-effort; never throws into startup.
+    /// On first run, offer to register Keincheck in the user's AI clients — but only once (a
+    /// marker file), and only when it is not already configured anywhere. Best-effort; never
+    /// throws into startup.
     /// </summary>
     private static void TryOfferFirstRunSetup()
     {
         try
         {
+            // Legacy marker name from when only Claude was supported; renaming it would
+            // re-show the offer to every existing user, so it stays.
             var marker = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "Keincheck", "claude-setup.offered");
             if (File.Exists(marker))
                 return;
 
-            var connectExe = ClaudeMcpSetup.ResolveConnectExe();
+            var connectExe = AgentMcpSetup.ResolveConnectExe();
             if (connectExe is null)
-                return; // nothing to point Claude at
+                return; // nothing to point the clients at
 
             void MarkOffered()
             {
@@ -194,14 +230,15 @@ public sealed class App : Application
                 catch { /* best-effort */ }
             }
 
-            if (ClaudeMcpSetup.IsConfigured(ClaudeTarget.Code, connectExe)
-                || ClaudeMcpSetup.IsConfigured(ClaudeTarget.Desktop, connectExe))
+            if (AgentMcpSetup.IsConfigured(AgentTarget.ClaudeCode, connectExe)
+                || AgentMcpSetup.IsConfigured(AgentTarget.ClaudeDesktop, connectExe)
+                || AgentMcpSetup.IsConfigured(AgentTarget.KimiCode, connectExe))
             {
                 MarkOffered(); // already set up somewhere — don't nag
                 return;
             }
 
-            ClaudeSetupUi.ShowFirstRunOffer(connectExe, MarkOffered);
+            AgentSetupUi.ShowFirstRunOffer(connectExe, MarkOffered);
         }
         catch
         {

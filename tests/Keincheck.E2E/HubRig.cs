@@ -138,8 +138,8 @@ public sealed class HubRig : IAsyncLifetime
         if (!File.Exists(ConnectExe))
             throw new FileNotFoundException(
                 "keincheck-connect.exe is missing from the hub directory. The shim must ship " +
-                "co-located with the hub — that is how the hub's 'Set up in Claude' points " +
-                "Claude at it, and how the shim finds the hub to launch.", ConnectExe);
+                "co-located with the hub — that is how the hub's 'Set up AI assistant' points " +
+                "the client at it, and how the shim finds the hub to launch.", ConnectExe);
 
         // A hub may already be up: the Velopack installer can launch one, or a developer
         // may have left theirs running. Ours would then lose the single-instance election

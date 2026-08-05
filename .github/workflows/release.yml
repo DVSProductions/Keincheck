@@ -44,8 +44,8 @@ jobs:
 
       - name: Publish the shim (Native AOT) and co-locate it with the hub
         # keincheck-connect.exe must ship alongside the hub: it is the stdio bridge the AI's
-        # MCP client spawns, and the hub's "Set up in Claude" points Claude at this co-located
-        # path. Native AOT makes it a small, instant-start, runtime-free native exe.
+        # MCP client spawns, and the hub's "Set up AI assistant" points the client at this
+        # co-located path. Native AOT makes it a small, instant-start, runtime-free native exe.
         run: |
           dotnet publish Keincheck.Connect/Keincheck.Connect.csproj -c Release -r win-x64 -o publish-shim
           Copy-Item publish-shim/keincheck-connect.exe publish/ -Force
