@@ -15,7 +15,11 @@ jobs:
   release:
     runs-on: windows-latest
     steps:
+      # Full history, not the default shallow clone: the release-notes step below reads
+      # the previous tag and the commit log between the two.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
@@ -68,3 +72,37 @@ jobs:
           --releaseName "Keincheck Hub ${{ steps.ver.outputs.version }}"
           --tag ${{ github.ref_name }}
           --token ${{ secrets.GITHUB_TOKEN }}
+
+      # vpk publishes the release with an empty body, so every release page used to say
+      # nothing about what changed. Runs after the upload because it edits the release
+      # vpk just created.
+      #
+      # GitHub's generate-notes is preferred — it credits each merged PR and its author —
+      # but it lists ONLY merged pull requests, so it returns an empty section for work
+      # that landed as direct commits on main. Most of this project's history is exactly
+      # that, hence the commit-log fallback.
+      - name: Write release notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          prev=$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)
+          gh api -X POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$TAG" ${prev:+-f previous_tag_name="$prev"} -q .body > notes.md
+
+          if ! grep -q '^\* ' notes.md; then
+            {
+              echo "## What's Changed"
+              echo
+              git log --no-merges --reverse --format='* %s (%h)' ${prev:+$prev..}"$TAG"
+              echo
+              if [ -n "$prev" ]; then
+                echo "**Full Changelog**: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/$prev...$TAG"
+              else
+                echo "**Full Changelog**: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commits/$TAG"
+              fi
+            } > notes.md
+          fi
+
+          gh release edit "$TAG" --notes-file notes.md
