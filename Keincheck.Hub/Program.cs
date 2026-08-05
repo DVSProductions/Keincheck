@@ -33,8 +33,15 @@ public static class Program
             return 0;
         }
 
-        // Best-effort: register to start at login so the hub is up when the AI connects.
-        StartupRegistration.TryRegister();
+        // Best-effort: register to start at login so the hub is up when the AI connects —
+        // unless the user opted out, in which case remove any registration an older version
+        // left behind. Opting out breaks nothing: keincheck-connect launches the hub on
+        // demand when an AI client connects.
+        var settings = HubSettings.Open();
+        if (settings.StartAtLogin)
+            StartupRegistration.TryRegister();
+        else
+            StartupRegistration.TryUnregister();
 
         var hubOptions = new HubOptions
         {
@@ -79,7 +86,7 @@ public static class Program
 
         try
         {
-            return BuildAvaloniaApp(broker).StartWithClassicDesktopLifetime(args);
+            return BuildAvaloniaApp(broker, settings).StartWithClassicDesktopLifetime(args);
         }
         finally
         {
@@ -107,8 +114,8 @@ public static class Program
     }
 
     /// <summary>Builds the Avalonia app, injecting the live broker into the tray UI.</summary>
-    public static AppBuilder BuildAvaloniaApp(PipeClientBroker broker)
-        => AppBuilder.Configure(() => new App(broker))
+    public static AppBuilder BuildAvaloniaApp(PipeClientBroker broker, HubSettings? settings = null)
+        => AppBuilder.Configure(() => new App(broker, settings))
             .UsePlatformDetect()
             .LogToTrace();
 

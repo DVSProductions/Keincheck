@@ -6,16 +6,20 @@ using Avalonia.Media;
 namespace Keincheck.Hub;
 
 /// <summary>
-/// The small tray-driven UI for <see cref="ClaudeMcpSetup"/>: a one-time first-run offer and the
+/// The small tray-driven UI for <see cref="AgentMcpSetup"/>: a one-time first-run offer and the
 /// result dialog shown after configuring. Built in code to match the hub's XAML-free style. Must
 /// be called on the UI thread.
 /// </summary>
-internal static class ClaudeSetupUi
+internal static class AgentSetupUi
 {
+    /// <summary>Every client the first-run offer wires up in one click.</summary>
+    public static readonly AgentTarget[] AllTargets =
+        { AgentTarget.ClaudeCode, AgentTarget.ClaudeDesktop, AgentTarget.KimiCode };
+
     /// <summary>Configures each <paramref name="targets"/> entry and shows a summary dialog.</summary>
-    public static void RunAndShowResult(IReadOnlyList<ClaudeTarget> targets, string connectExe)
+    public static void RunAndShowResult(IReadOnlyList<AgentTarget> targets, string connectExe)
     {
-        var results = targets.Select(t => ClaudeMcpSetup.Configure(t, connectExe)).ToList();
+        var results = targets.Select(t => AgentMcpSetup.Configure(t, connectExe)).ToList();
 
         var body = new StringBuilder();
         foreach (var r in results)
@@ -25,9 +29,9 @@ internal static class ClaudeSetupUi
             body.AppendLine($"    {r.Path}");
         }
         if (results.Any(r => r.Outcome is ConfigOutcome.Added or ConfigOutcome.Updated))
-            body.Append("\nRestart Claude to pick up the change.");
+            body.Append("\nRestart the AI client to pick up the change.");
 
-        ShowMessage("Keincheck — Claude setup", body.ToString().TrimEnd());
+        ShowMessage("Keincheck — AI client setup", body.ToString().TrimEnd());
     }
 
     /// <summary>
@@ -38,14 +42,14 @@ internal static class ClaudeSetupUi
     {
         var intro = new TextBlock
         {
-            Text = "Let Claude see and drive this app's UI?\n\n" +
-                   "Keincheck can add a \"keincheck-hub\" MCP server to Claude Code and Claude " +
-                   "Desktop so an AI assistant can inspect and operate apps connected to this hub. " +
-                   "You can always do this later from the tray menu.",
+            Text = "Let an AI assistant see and drive this app's UI?\n\n" +
+                   "Keincheck can add a \"keincheck-hub\" MCP server to Claude Code, Claude " +
+                   "Desktop, and Kimi Code so an AI assistant can inspect and operate apps " +
+                   "connected to this hub. You can always do this later from the tray menu.",
             TextWrapping = TextWrapping.Wrap,
         };
 
-        var setup = new Button { Content = "Set up Claude Code + Desktop", HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Center };
+        var setup = new Button { Content = "Set up Claude + Kimi Code", HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Center };
         var notNow = new Button { Content = "Not now", HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Center };
 
         var window = NewDialog("Keincheck", out var root);
@@ -56,7 +60,7 @@ internal static class ClaudeSetupUi
         setup.Click += (_, _) =>
         {
             window.Close();
-            RunAndShowResult(new[] { ClaudeTarget.Code, ClaudeTarget.Desktop }, connectExe);
+            RunAndShowResult(AllTargets, connectExe);
             onClosed();
         };
         notNow.Click += (_, _) =>

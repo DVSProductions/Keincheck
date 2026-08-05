@@ -4,14 +4,17 @@ using System.Text.Json.Nodes;
 
 namespace Keincheck.Hub;
 
-/// <summary>Which Claude client's MCP configuration to write.</summary>
-public enum ClaudeTarget
+/// <summary>Which AI client's MCP configuration to write.</summary>
+public enum AgentTarget
 {
     /// <summary>Claude Code's user-scoped config (<c>~/.claude.json</c>), available in every project.</summary>
-    Code,
+    ClaudeCode,
 
     /// <summary>Claude Desktop's config (<c>%APPDATA%\Claude\claude_desktop_config.json</c>).</summary>
-    Desktop,
+    ClaudeDesktop,
+
+    /// <summary>Kimi Code's user-level config (<c>~/.kimi-code/mcp.json</c>, or <c>$KIMI_CODE_HOME/mcp.json</c>).</summary>
+    KimiCode,
 }
 
 /// <summary>What writing the config did.</summary>
@@ -30,23 +33,24 @@ public enum ConfigOutcome
     Failed,
 }
 
-/// <summary>The result of configuring one Claude target.</summary>
-public readonly record struct SetupResult(ClaudeTarget Target, ConfigOutcome Outcome, string Path, string Message);
+/// <summary>The result of configuring one agent target.</summary>
+public readonly record struct SetupResult(AgentTarget Target, ConfigOutcome Outcome, string Path, string Message);
 
 /// <summary>
 /// Registers the hub's stdio bridge (<c>keincheck-connect.exe</c>) as a <c>keincheck-hub</c>
-/// MCP server in Claude's configuration, so a user gets the AI↔hub link without hand-editing
-/// JSON. Writes the config file directly (rather than shelling out to <c>claude mcp add</c>):
-/// it is idempotent, needs no <c>claude</c> CLI on PATH, and is the same shape for both targets.
+/// MCP server in an AI client's configuration, so a user gets the AI↔hub link without
+/// hand-editing JSON. Writes the config file directly (rather than shelling out to a CLI):
+/// it is idempotent, needs no client CLI on PATH, and every supported client keeps its MCP
+/// servers in the same <c>mcpServers</c> JSON shape.
 /// </summary>
 /// <remarks>
 /// Every edit is a <b>safe merge</b> — existing servers and unrelated keys are preserved, and a
 /// config that is not valid JSON is left untouched (reported as <see cref="ConfigOutcome.Failed"/>)
-/// rather than clobbered. Claude reads the file on its next start, so a restart is needed.
+/// rather than clobbered. Clients read the file on their next start, so a restart is needed.
 /// </remarks>
-public static class ClaudeMcpSetup
+public static class AgentMcpSetup
 {
-    /// <summary>The MCP server name written into Claude's config.</summary>
+    /// <summary>The MCP server name written into the client's config.</summary>
     public const string ServerName = "keincheck-hub";
 
     // ---------------------------------------------------------------- core merge
@@ -56,16 +60,23 @@ public static class ClaudeMcpSetup
     /// pointing at <paramref name="command"/> into <paramref name="existingJson"/>, preserving
     /// every other server and top-level key. Returns the new JSON text and what changed.
     /// </summary>
+    /// <param name="writeTypeField">
+    /// Claude's configs carry an explicit <c>"type": "stdio"</c>; Kimi's <c>mcp.json</c> treats
+    /// any entry with a <c>command</c> as stdio and reserves <c>transport</c> for SSE, so no
+    /// type field is written there. Fields the user added to the entry (env, extra args, a stray
+    /// <c>transport</c>, …) are preserved either way.
+    /// </param>
     /// <exception cref="JsonException">
     /// <paramref name="existingJson"/> is non-empty but not a valid JSON object — the caller MUST
     /// NOT overwrite the file in that case.
     /// </exception>
-    public static (string Json, ConfigOutcome Outcome) AddServer(string? existingJson, string serverName, string command)
+    public static (string Json, ConfigOutcome Outcome) AddServer(
+        string? existingJson, string serverName, string command, bool writeTypeField = true)
     {
         var root = string.IsNullOrWhiteSpace(existingJson)
             ? new JsonObject()
             : JsonNode.Parse(existingJson) as JsonObject
-              ?? throw new JsonException("The Claude config root is not a JSON object.");
+              ?? throw new JsonException("The MCP config root is not a JSON object.");
 
         if (root["mcpServers"] is not JsonObject servers)
         {
@@ -78,7 +89,8 @@ public static class ClaudeMcpSetup
 
         // Refresh only the essentials; preserve any fields the user added (env, extra args, …).
         var changed = !existed;
-        changed |= SetString(entry, "type", "stdio");
+        if (writeTypeField)
+            changed |= SetString(entry, "type", "stdio");
         changed |= SetString(entry, "command", command);
         if (entry["args"] is null)
         {
@@ -106,26 +118,39 @@ public static class ClaudeMcpSetup
     // ------------------------------------------------------------- file targets
 
     /// <summary>The config file path for <paramref name="target"/> (the file may not exist yet).</summary>
-    public static string TargetPath(ClaudeTarget target) => target switch
+    public static string TargetPath(AgentTarget target) => target switch
     {
-        ClaudeTarget.Desktop => Path.Combine(
+        AgentTarget.ClaudeDesktop => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Claude", "claude_desktop_config.json"),
-        ClaudeTarget.Code => Path.Combine(
+        AgentTarget.ClaudeCode => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude.json"),
+        AgentTarget.KimiCode => KimiConfigPath(),
         _ => throw new ArgumentOutOfRangeException(nameof(target)),
     };
+
+    /// <summary>
+    /// Kimi Code's user-level MCP config: <c>$KIMI_CODE_HOME/mcp.json</c> when the override is
+    /// set, else <c>~/.kimi-code/mcp.json</c>.
+    /// </summary>
+    private static string KimiConfigPath()
+    {
+        var home = Environment.GetEnvironmentVariable("KIMI_CODE_HOME");
+        if (string.IsNullOrWhiteSpace(home))
+            home = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".kimi-code");
+        return Path.Combine(home, "mcp.json");
+    }
 
     /// <summary>
     /// Writes (or refreshes) the <c>keincheck-hub</c> entry in <paramref name="target"/>'s config to
     /// point at <paramref name="connectExe"/>. Safe: a malformed existing file is left untouched.
     /// </summary>
-    public static SetupResult Configure(ClaudeTarget target, string connectExe)
+    public static SetupResult Configure(AgentTarget target, string connectExe)
     {
         var path = TargetPath(target);
         try
         {
             var existing = File.Exists(path) ? File.ReadAllText(path) : null;
-            var (json, outcome) = AddServer(existing, ServerName, connectExe);
+            var (json, outcome) = AddServer(existing, ServerName, connectExe, WritesTypeField(target));
 
             if (outcome != ConfigOutcome.AlreadyCurrent)
             {
@@ -143,7 +168,7 @@ public static class ClaudeMcpSetup
     }
 
     /// <summary>Whether <paramref name="target"/>'s config already points <c>keincheck-hub</c> at <paramref name="connectExe"/>.</summary>
-    public static bool IsConfigured(ClaudeTarget target, string connectExe)
+    public static bool IsConfigured(AgentTarget target, string connectExe)
     {
         try
         {
@@ -216,15 +241,19 @@ public static class ClaudeMcpSetup
 
     // ------------------------------------------------------------- labels
 
+    /// <summary>Claude configs carry <c>"type": "stdio"</c>; Kimi infers stdio from <c>command</c>.</summary>
+    private static bool WritesTypeField(AgentTarget target) => target is not AgentTarget.KimiCode;
+
     /// <summary>A human-readable label for a target (used in dialogs / logs).</summary>
-    public static string Label(ClaudeTarget target) => target switch
+    public static string Label(AgentTarget target) => target switch
     {
-        ClaudeTarget.Code => "Claude Code",
-        ClaudeTarget.Desktop => "Claude Desktop",
+        AgentTarget.ClaudeCode => "Claude Code",
+        AgentTarget.ClaudeDesktop => "Claude Desktop",
+        AgentTarget.KimiCode => "Kimi Code",
         _ => target.ToString(),
     };
 
-    private static string DescribeOutcome(ClaudeTarget target, ConfigOutcome outcome) => outcome switch
+    private static string DescribeOutcome(AgentTarget target, ConfigOutcome outcome) => outcome switch
     {
         ConfigOutcome.Added => $"Added keincheck-hub to {Label(target)}.",
         ConfigOutcome.Updated => $"Updated keincheck-hub in {Label(target)}.",
