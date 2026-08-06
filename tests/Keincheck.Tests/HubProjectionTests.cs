@@ -189,21 +189,28 @@ public sealed class HubProjectionTests
         public ClientInfo? ClientStatus(string clientId)
             => _known.FirstOrDefault(c => c.ClientId == clientId);
 
-        public string? ActiveClientId { get; set; }
+        public string? DefaultClientId { get; set; }
 
-        public Task<int> LaunchClientAsync(string clientId, CancellationToken cancellationToken = default)
+        public Task<LaunchResult> LaunchClientAsync(
+            string clientId, LaunchOptions? launch = null, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
-        public Task<int> RestartClientAsync(string clientId, CancellationToken cancellationToken = default)
+        public Task<LaunchResult> RestartClientAsync(
+            string clientId, LaunchOptions? launch = null, CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
         public Task<ClientInfo?> WaitForClientAsync(
             string? appIdOrClientId, TimeSpan timeout, CancellationToken cancellationToken = default)
             => Task.FromResult<ClientInfo?>(null);
+        public Task<ClientInfo?> WaitForClientAsync(
+            ClientWaitFilter filter, TimeSpan timeout, CancellationToken cancellationToken = default)
+            => Task.FromResult<ClientInfo?>(null);
         public Task<ToolResultMessage> InvokeOnClientAsync(
-            string clientId, string toolName, JsonElement? argumentsJson, CancellationToken cancellationToken = default)
+            string clientId, string toolName, JsonElement? argumentsJson,
+            CancellationToken cancellationToken = default, string? agent = null)
             => throw new NotSupportedException();
 
         public event EventHandler<ClientInfo>? ClientConnected { add { } remove { } }
         public event EventHandler<ClientInfo>? ClientUpdated { add { } remove { } }
         public event EventHandler<ClientInfo>? ClientDown { add { } remove { } }
+        public event EventHandler<ClientInfo>? LaunchRegistered { add { } remove { } }
     }
 }

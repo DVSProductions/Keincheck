@@ -115,7 +115,7 @@ public sealed class V1ClientCompatibilityTests
         Assert.False(session.Info.ReadOnly);
 
         // ...and it auto-activates, as a local client always has.
-        Assert.Equal("legacyapp#1", broker.ActiveClientId);
+        Assert.Equal("legacyapp#1", broker.DefaultClientId);
         Assert.Equal(3, session.Info.Tools.Count);
     }
 
@@ -312,7 +312,7 @@ public sealed class V1ClientCompatibilityTests
         Assert.Equal("myapp#1", legacy.Info.ClientId);
 
         // The v1 client keeps active; a remote one never steals it.
-        Assert.Equal("myapp#1", broker.ActiveClientId);
+        Assert.Equal("myapp#1", broker.DefaultClientId);
 
         cts.Cancel();
         await remoteClient.DisposeAsync();

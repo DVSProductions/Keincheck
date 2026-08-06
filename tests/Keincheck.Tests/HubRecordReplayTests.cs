@@ -120,7 +120,7 @@ public sealed class HubRecordReplayTests
     public async Task Record_Captures_Only_Proxied_Steps_Then_Stop_Reports_Count()
     {
         var broker = BrokerWithClient();
-        broker.ActiveClientId = "app1";
+        broker.DefaultClientId = "app1";
 
         var invokes = new List<(string client, string tool)>();
         broker.InvokeHandler = (clientId, tool, args, ct) =>
@@ -178,7 +178,7 @@ public sealed class HubRecordReplayTests
     public async Task Replay_ReIssues_Every_Recorded_Step_In_Order()
     {
         var broker = BrokerWithClient();
-        broker.ActiveClientId = "app1";
+        broker.DefaultClientId = "app1";
 
         var invokes = new List<(string client, string tool, string? args)>();
         broker.InvokeHandler = (clientId, tool, args, ct) =>

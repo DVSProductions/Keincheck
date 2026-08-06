@@ -83,7 +83,7 @@ public sealed class HubStaticToolingTests
     public async Task Static_Mode_Lists_Only_MetaTools_And_No_ListChanged_Capability()
     {
         var broker = BrokerWithClient();
-        broker.ActiveClientId = "app1";
+        broker.DefaultClientId = "app1";
         var (client, hub, cts, serverTask) = await ConnectAsync(broker, dynamicTooling: false);
         try
         {
@@ -132,7 +132,7 @@ public sealed class HubStaticToolingTests
     public async Task Static_Mode_CallTool_Proxies_To_Active_Client()
     {
         var broker = BrokerWithClient();
-        broker.ActiveClientId = "app1";
+        broker.DefaultClientId = "app1";
         string? invokedClient = null;
         string? invokedTool = null;
         string? forwardedArgs = null;
@@ -171,7 +171,7 @@ public sealed class HubStaticToolingTests
     {
         var broker = BrokerWithClient();
         broker.Upsert(new ClientInfo { ClientId = "app2", IsConnected = true });
-        broker.ActiveClientId = "app1";
+        broker.DefaultClientId = "app1";
 
         string? invokedClient = null;
         string? forwardedArgs = null;
@@ -206,7 +206,7 @@ public sealed class HubStaticToolingTests
     public async Task CallTool_Without_Tool_Arg_Returns_Error()
     {
         var broker = BrokerWithClient();
-        broker.ActiveClientId = "app1";
+        broker.DefaultClientId = "app1";
         var (client, hub, cts, serverTask) = await ConnectAsync(broker, dynamicTooling: false);
         try
         {
@@ -224,7 +224,7 @@ public sealed class HubStaticToolingTests
     public async Task ListClientTools_Returns_Descriptors_Without_ListChanged()
     {
         var broker = BrokerWithClient();
-        broker.ActiveClientId = "app1";
+        broker.DefaultClientId = "app1";
         var (client, hub, cts, serverTask) = await ConnectAsync(broker, dynamicTooling: false);
         try
         {
@@ -251,7 +251,7 @@ public sealed class HubStaticToolingTests
         // The default stays dynamic: client tools are listed directly, listChanged is
         // advertised, and hub_call_tool is available there too.
         var broker = BrokerWithClient();
-        broker.ActiveClientId = "app1";
+        broker.DefaultClientId = "app1";
         var (client, hub, cts, serverTask) = await ConnectAsync(broker, dynamicTooling: true);
         try
         {

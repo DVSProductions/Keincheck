@@ -47,6 +47,18 @@ public enum AuditKind
 
     /// <summary>Remote access was enabled or disabled.</summary>
     RemoteToggled,
+
+    /// <summary>The hub started an app process on an agent's behalf.</summary>
+    Launch,
+
+    /// <summary>An agent took the exclusive right to drive an app instance.</summary>
+    ClaimAcquired,
+
+    /// <summary>An agent gave up (or lost) the right to drive an app instance.</summary>
+    ClaimReleased,
+
+    /// <summary>A mutating call was refused because another agent is driving that instance.</summary>
+    ClaimDenied,
 }
 
 /// <summary>
@@ -80,6 +92,16 @@ public sealed record AuditEntry
     /// <summary>How the client is attached, when known.</summary>
     public ClientTransport? Transport { get; init; }
 
+    /// <summary>
+    /// The agent session that caused this entry (e.g. <c>claude-code-2</c>), when one did.
+    /// </summary>
+    /// <remarks>
+    /// Several agents share one hub, so "a click was sent to myapp#1" stopped being a
+    /// complete answer: the operator also needs to know which agent sent it. Null for events
+    /// the hub raised itself (a client attaching, the watchdog dropping one).
+    /// </remarks>
+    public string? Agent { get; init; }
+
     /// <summary>A short, human-readable one-liner for the tray log.</summary>
     public string Summary
     {
@@ -89,19 +111,20 @@ public sealed record AuditEntry
             // Remote entries are marked so an operator scanning the log can tell at a glance
             // which lines came from another machine.
             var where = Host is { Length: > 0 } host ? $"@{host} " : string.Empty;
+            var who = Agent is { Length: > 0 } agent ? $" [{agent}]" : string.Empty;
 
             if (Kind != AuditKind.Invoke)
             {
                 var detail = Error is { Length: > 0 } e ? $"  — {e}" : string.Empty;
-                return $"{t}  [{Kind.ToString().ToLowerInvariant()}] {where}{ToolName}{detail}";
+                return $"{t}  [{Kind.ToString().ToLowerInvariant()}]{who} {where}{ToolName}{detail}";
             }
 
             return Outcome switch
             {
-                AuditOutcome.Started => $"{t}  → {where}{ClientId}  {ToolName}",
-                AuditOutcome.Ok => $"{t}  ✓ {where}{ClientId}  {ToolName}",
-                AuditOutcome.Error => $"{t}  ✗ {where}{ClientId}  {ToolName}  — {Error}",
-                _ => $"{t}  {where}{ClientId}  {ToolName}",
+                AuditOutcome.Started => $"{t}  →{who} {where}{ClientId}  {ToolName}",
+                AuditOutcome.Ok => $"{t}  ✓{who} {where}{ClientId}  {ToolName}",
+                AuditOutcome.Error => $"{t}  ✗{who} {where}{ClientId}  {ToolName}  — {Error}",
+                _ => $"{t} {who} {where}{ClientId}  {ToolName}",
             };
         }
     }

@@ -9,7 +9,7 @@
 > | Shared token, phase 1 with "zero new auth" | **mTLS with a hub-owned CA** | The hub issues client certs and clients pin its root, so neither side talks to anyone the CA did not vouch for. It also makes identity free — see below. |
 > | Phase 1 (SSH tunnel) then phase 2 (TLS) | **One code path; TLS always** | With hub-issued certs the tunnelled and direct cases differ only in *where you point it*. There is no plaintext mode to ship by accident, and no throwaway MVP code. |
 > | Host stamped from the accepted connection | **Host = CN of the validated client cert** | §3 preferred socket-stamping over self-report, correctly rejecting self-report — but over an SSH tunnel the peer address is *always* `127.0.0.1`, so the socket carries no information. The credential does. |
-> | `RemoteClientBroker` + `CompositeClientBroker` | **One broker, a listener seam** | A single registry makes id uniqueness, `ActiveClientId`, `ListClients()` (which `HubUpdater` consults before restarting), event ordering and audit correct by construction. A composite would re-derive all of them, and `App`/`HubViewModel` take the concrete broker. |
+> | `RemoteClientBroker` + `CompositeClientBroker` | **One broker, a listener seam** | A single registry makes id uniqueness, `DefaultClientId`, `ListClients()` (which `HubUpdater` consults before restarting), event ordering and audit correct by construction. A composite would re-derive all of them, and `App`/`HubViewModel` take the concrete broker. |
 > | Remote as a hub capability | **`Keincheck.Remote` is a separate package** | An app that does not reference it links no socket or TLS code at all, so remote debuggability cannot be enabled by accident. |
 >
 > Two premises in the original text are wrong and were not implemented as written:
@@ -101,7 +101,7 @@ drop-in.** The message set (`Register`, `Heartbeat`, `ToolList`, `InvokeTool`, `
   (Rename `PipeChannel` → `MessageChannel` eventually; it was never really about pipes.)
 
 **The broker is already an interface.** `IClientBroker` (ListClients / ClientStatus /
-ActiveClientId / Launch / Restart / WaitForClient / **InvokeOnClient** / connect+update+down
+DefaultClientId / Launch / Restart / WaitForClient / **InvokeOnClient** / connect+update+down
 events) is consumed by `HubMcpServer`; `PipeClientBroker` is just one implementation. Add a
 `RemoteClientBroker` that accepts network sessions and speaks the same protocol, and a
 `CompositeClientBroker` that merges local-pipe and remote clients into a single `ListClients`.

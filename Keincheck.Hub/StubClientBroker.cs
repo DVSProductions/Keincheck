@@ -22,7 +22,7 @@ public sealed class StubClientBroker : IClientBroker
     public Func<string, string, JsonElement?, CancellationToken, Task<ToolResultMessage>>? InvokeHandler { get; set; }
 
     /// <inheritdoc/>
-    public string? ActiveClientId
+    public string? DefaultClientId
     {
         get { lock (_gate) return _active; }
         set
@@ -82,13 +82,29 @@ public sealed class StubClientBroker : IClientBroker
         lock (_gate) return _known.TryGetValue(clientId, out var c) ? c : null;
     }
 
-    /// <inheritdoc/>
-    public Task<int> LaunchClientAsync(string clientId, CancellationToken cancellationToken = default)
-        => throw new NotSupportedException("StubClientBroker cannot launch apps; Phase-B broker implements this.");
+    /// <summary>Test/seam hook: how the stub satisfies launch and restart.</summary>
+    public Func<string, LaunchOptions?, LaunchResult>? LaunchHandler { get; set; }
 
     /// <inheritdoc/>
-    public Task<int> RestartClientAsync(string clientId, CancellationToken cancellationToken = default)
-        => throw new NotSupportedException("StubClientBroker cannot restart apps; Phase-B broker implements this.");
+    public Task<LaunchResult> LaunchClientAsync(
+        string clientId, LaunchOptions? launch = null, CancellationToken cancellationToken = default)
+        => LaunchHandler is { } handler
+            ? Task.FromResult(handler(clientId, launch))
+            : throw new NotSupportedException("StubClientBroker cannot launch apps; set LaunchHandler.");
+
+    /// <inheritdoc/>
+    public Task<LaunchResult> RestartClientAsync(
+        string clientId, LaunchOptions? launch = null, CancellationToken cancellationToken = default)
+        => LaunchHandler is { } handler
+            ? Task.FromResult(handler(clientId, launch))
+            : throw new NotSupportedException("StubClientBroker cannot restart apps; set LaunchHandler.");
+
+    /// <summary>Simulates a hub-launched client finishing registration.</summary>
+    public void RaiseLaunchRegistered(ClientInfo info)
+    {
+        Upsert(info);
+        LaunchRegistered?.Invoke(this, info);
+    }
 
     /// <inheritdoc/>
     public Task<ClientInfo?> WaitForClientAsync(
@@ -114,13 +130,47 @@ public sealed class StubClientBroker : IClientBroker
     }
 
     /// <inheritdoc/>
+    public Task<ClientInfo?> WaitForClientAsync(
+        ClientWaitFilter filter, TimeSpan timeout, CancellationToken cancellationToken = default)
+    {
+        lock (_gate)
+        {
+            foreach (var c in _known.Values)
+            {
+                if (!c.IsConnected)
+                    continue;
+                if (filter.LaunchId is { Length: > 0 } launchId)
+                {
+                    if (string.Equals(c.LaunchId, launchId, StringComparison.Ordinal))
+                        return Task.FromResult<ClientInfo?>(c);
+                    continue;
+                }
+                if (filter.ProcessId is { } pid && c.ProcessId != pid)
+                    continue;
+                if (string.IsNullOrWhiteSpace(filter.IdOrAppId)
+                    || string.Equals(c.ClientId, filter.IdOrAppId, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(c.AppId, filter.IdOrAppId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return Task.FromResult<ClientInfo?>(c);
+                }
+            }
+        }
+        return Task.FromResult<ClientInfo?>(null);
+    }
+
+    /// <inheritdoc/>
     public Task<ToolResultMessage> InvokeOnClientAsync(
-        string clientId, string toolName, JsonElement? argumentsJson, CancellationToken cancellationToken = default)
+        string clientId, string toolName, JsonElement? argumentsJson,
+        CancellationToken cancellationToken = default, string? agent = null)
     {
         if (InvokeHandler is null)
             throw new InvalidOperationException("StubClientBroker.InvokeHandler is not set.");
+        LastAgent = agent;
         return InvokeHandler(clientId, toolName, argumentsJson, cancellationToken);
     }
+
+    /// <summary>The agent label passed to the most recent invoke (test seam).</summary>
+    public string? LastAgent { get; private set; }
 
     /// <inheritdoc/>
     public event EventHandler<ClientInfo>? ClientConnected;
@@ -128,4 +178,6 @@ public sealed class StubClientBroker : IClientBroker
     public event EventHandler<ClientInfo>? ClientUpdated;
     /// <inheritdoc/>
     public event EventHandler<ClientInfo>? ClientDown;
+    /// <inheritdoc/>
+    public event EventHandler<ClientInfo>? LaunchRegistered;
 }

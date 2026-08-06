@@ -45,6 +45,24 @@ public sealed class BrokerOptions
     /// <c>#1</c> suffix (e.g. <c>MyApp#1</c>); always-suffixed keeps ids predictable.
     /// </summary>
     public bool AlwaysSuffixInstance { get; set; } = true;
+
+    /// <summary>
+    /// How long the hub remembers that it launched a process, waiting for that process to
+    /// register so the instance can be associated with the agent session that asked for it.
+    /// </summary>
+    /// <remarks>
+    /// A launch that never registers (the app crashed on startup, or it is simply slow) must
+    /// not leave an entry behind forever: the pending table is matched on process id as well
+    /// as launch token, and a stale entry is how an unrelated process that later happens to
+    /// reuse that pid would be handed someone else's claim.
+    /// </remarks>
+    public TimeSpan LaunchRegisterTimeout { get; set; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// Test seam: how a launch actually starts a process. Null (the default) uses
+    /// <see cref="Process.Start(ProcessStartInfo)"/>.
+    /// </summary>
+    internal Func<ProcessStartInfo, int>? ProcessStarter { get; set; }
 }
 
 /// <summary>
@@ -77,15 +95,22 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     private readonly Dictionary<string, SortedSet<int>> _reservedSuffixes = new(StringComparer.OrdinalIgnoreCase);
     // Hub-id -> last-known snapshot for disconnected-but-seen clients.
     private readonly Dictionary<string, ClientInfo> _seen = new(StringComparer.Ordinal);
+    // Launch id -> the launch we are still waiting to see register. Swept by the watchdog so
+    // a launch that never registers cannot leave an entry that a later, unrelated process
+    // reusing that pid would match against.
+    private readonly Dictionary<string, PendingLaunch> _pendingLaunches = new(StringComparer.Ordinal);
 
     private readonly CancellationTokenSource _cts = new();
     private Task? _acceptLoop;
     private Task? _watchdog;
-    private string? _active;
-    // The hub-id that was active when it last disconnected. Lets a reconnecting client
-    // reclaim active automatically (finding-1) — but only while no other client has been
-    // made active in the meantime, so a deliberate manual selection is respected.
-    private string? _lastActive;
+    // The hub-wide default selection: the seed a newly connected agent session starts from,
+    // and the tray's notion of "the" client. NOT the routing authority — each MCP session
+    // carries its own selection (see HubSession).
+    private string? _default;
+    // The hub-id that was the default when it last disconnected. Lets a reconnecting client
+    // reclaim the default automatically (finding-1) — but only while no other client has been
+    // made default in the meantime, so a deliberate manual selection is respected.
+    private string? _lastDefault;
     private int _disposed;
 
     // Null unless remote access is set up. A hub with no issuer refuses every enrollment
@@ -398,8 +423,21 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
         ClientInfo info;
         LiveClient live;
         LiveClient? supersededStale = null;
+        PendingLaunch? launch = null;
         lock (_gate)
         {
+            // Did an agent ask for this instance? Prefer the launch token — the process the
+            // hub started is often not the one that registers (launcher script, dotnet host),
+            // and pid matching silently fails exactly there. Pid is the fallback for clients
+            // too old to echo the token. Remote sessions never match: their pid is not from
+            // this machine, and the hub cannot launch them in the first place.
+            if (!context.IsRemote)
+            {
+                launch = FindPendingLaunch_NoLock(reg.LaunchToken, localProcessId, identity);
+                if (launch is not null)
+                    _pendingLaunches.Remove(launch.LaunchId);
+            }
+
             // Stale-reconnect dedup (finding-2 Fix A): if a live session for the SAME app
             // and SAME process is already registered, this Register is that process
             // re-registering (its client auto-reconnected before the old session's
@@ -468,6 +506,9 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
                 MachineId = context.MachineId ?? (context.IsRemote ? null : Environment.MachineName),
                 CanLaunch = context.CanLaunch,
                 IdentityKey = identity,
+                LaunchId = launch?.LaunchId,
+                LaunchSessionId = launch?.SessionId,
+                LaunchSessionLabel = launch?.SessionLabel,
             };
             live.Touch();
             _live[hubId] = live;
@@ -507,33 +548,61 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
 
         // Auto-activate so the AI sees tools immediately, without a manual
         // hub_select_client. Two cases, both gated on no client currently being active:
-        //   - the very first client this run (_lastActive is null), as before; or
+        //   - the very first client this run (_lastDefault is null), as before; or
         //   - the SAME client that was active when it dropped reclaiming its slot
         //     (finding-1 auto-reselect). A DIFFERENT client reconnecting must NOT steal
         //     active away from a deliberate manual selection made while the first was
-        //     down — which is why we require live.ClientId == _lastActive here.
+        //     down — which is why we require live.ClientId == _lastDefault here.
         //
         // A REMOTE client never auto-activates, even as the first client of a run. Tool calls
         // are routed to whichever client is active, so auto-activating on connect would mean
         // that whatever attaches first receives the operator's calls — arguments included —
         // and answers them. Requiring an explicit hub_select_client keeps that a decision.
         // Reclaiming a slot it was already deliberately selected for is still allowed.
+        //
+        // An instance an agent asked the hub to launch is NOT a candidate: it belongs to that
+        // agent, and making it the hub-wide default would hand it to whoever connects next.
         var becameActive = false;
-        lock (_gate)
+        if (launch is null)
         {
-            var mayAutoActivate = !context.IsRemote || live.ClientId == _lastActive;
-            if (mayAutoActivate && _active is null && (_lastActive is null || live.ClientId == _lastActive))
+            lock (_gate)
             {
-                _active = live.ClientId;
-                _lastActive = null; // consumed — don't re-steal on a later reconnect
-                becameActive = true;
+                var mayAutoActivate = !context.IsRemote || live.ClientId == _lastDefault;
+                if (mayAutoActivate && _default is null && (_lastDefault is null || live.ClientId == _lastDefault))
+                {
+                    _default = live.ClientId;
+                    _lastDefault = null; // consumed — don't re-steal on a later reconnect
+                    becameActive = true;
+                }
             }
         }
 
         ClientConnected?.Invoke(this, info);
         if (becameActive)
             ClientUpdated?.Invoke(this, info); // nudge the MCP server to re-list
+        if (launch is not null)
+            LaunchRegistered?.Invoke(this, info);
         return live;
+    }
+
+    /// <summary>
+    /// Matches a registration back to the launch that produced it: by token when the client
+    /// echoed one, otherwise by process id. Caller holds <see cref="_gate"/>.
+    /// </summary>
+    private PendingLaunch? FindPendingLaunch_NoLock(string? launchToken, int processId, string identity)
+    {
+        if (launchToken is { Length: > 0 } token && _pendingLaunches.TryGetValue(token, out var byToken))
+            return byToken;
+
+        if (processId <= 0)
+            return null;
+
+        // Pid fallback for clients that predate the token. Require the app identity to match
+        // too, so an unrelated app that happens to be started at the same moment cannot be
+        // mistaken for the one that was asked for.
+        return _pendingLaunches.Values.FirstOrDefault(p =>
+            p.ProcessId == processId
+            && string.Equals(p.Identity, identity, StringComparison.OrdinalIgnoreCase));
     }
 
     private void HandleToolList(LiveClient? client, MessageEnvelope envelope)
@@ -605,15 +674,15 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
             // selection on every wifi blip and growing _seen forever. It also removed a slot
             // from an unrelated LOCAL app that happened to share the AppId.
             ReleaseSuffix_NoLock(client.IdentityKey, client.ClientId);
-            wasActive = _active == client.ClientId;
+            wasActive = _default == client.ClientId;
             if (wasActive)
             {
                 // Clear active so ListClients reflects reality, but remember this id so
                 // its reconnect auto-reclaims active (finding-1 auto-reselect). A manual
-                // hub_select_client of a different client now sets _active non-null, which
-                // the reconnect's "_active is null" guard then respects.
-                _active = null;
-                _lastActive = client.ClientId;
+                // hub_select_client of a different client now sets _default non-null, which
+                // the reconnect's "_default is null" guard then respects.
+                _default = null;
+                _lastDefault = client.ClientId;
             }
         }
 
@@ -646,6 +715,16 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
                     stale = _live.Values
                         .Where(c => now - c.LastSeenUtc > _options.HeartbeatTimeout)
                         .ToList();
+
+                    // Forget launches that never registered. Left alone they would keep
+                    // matching on process id, so an unrelated process that later reuses that
+                    // pid would be handed an agent's claim.
+                    foreach (var expired in _pendingLaunches.Values
+                                 .Where(p => now - p.CreatedUtc > _options.LaunchRegisterTimeout)
+                                 .ToList())
+                    {
+                        _pendingLaunches.Remove(expired.LaunchId);
+                    }
                 }
 
                 foreach (var c in stale)
@@ -691,18 +770,18 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     }
 
     /// <inheritdoc/>
-    public string? ActiveClientId
+    public string? DefaultClientId
     {
-        get { lock (_gate) return _active; }
+        get { lock (_gate) return _default; }
         set
         {
             ClientInfo? info;
             lock (_gate)
             {
-                _active = value;
+                _default = value;
                 // A deliberate selection supersedes any pending auto-reselect target, so a
                 // previously-active client reconnecting later won't steal this choice back.
-                _lastActive = null;
+                _lastDefault = null;
                 info = value is not null
                     ? (_live.TryGetValue(value, out var l) ? Snapshot_NoLock(l)
                         : _seen.TryGetValue(value, out var s) ? s : null)
@@ -715,7 +794,8 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
 
     /// <inheritdoc/>
     public async Task<ToolResultMessage> InvokeOnClientAsync(
-        string clientId, string toolName, JsonElement? argumentsJson, CancellationToken cancellationToken = default)
+        string clientId, string toolName, JsonElement? argumentsJson,
+        CancellationToken cancellationToken = default, string? agent = null)
     {
         LiveClient client;
         lock (_gate)
@@ -733,6 +813,7 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
             TimestampUtc = DateTimeOffset.UtcNow,
             ClientId = clientId,
             ToolName = toolName,
+            Agent = agent,
             Outcome = AuditOutcome.Started,
         });
 
@@ -768,6 +849,7 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
                     TimestampUtc = DateTimeOffset.UtcNow,
                     ClientId = clientId,
                     ToolName = toolName,
+                    Agent = agent,
                     Outcome = result.IsError ? AuditOutcome.Error : AuditOutcome.Ok,
                     Error = result.IsError ? result.Error : null,
                 });
@@ -782,6 +864,7 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
                 TimestampUtc = DateTimeOffset.UtcNow,
                 ClientId = clientId,
                 ToolName = toolName,
+                Agent = agent,
                 Outcome = AuditOutcome.Error,
                 Error = "timed out",
             });
@@ -795,6 +878,7 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
                 TimestampUtc = DateTimeOffset.UtcNow,
                 ClientId = clientId,
                 ToolName = toolName,
+                Agent = agent,
                 Outcome = AuditOutcome.Error,
                 Error = ex.Message,
             });
@@ -865,43 +949,135 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     }
 
     /// <inheritdoc/>
-    public Task<int> LaunchClientAsync(string clientId, CancellationToken cancellationToken = default)
+    public Task<LaunchResult> LaunchClientAsync(
+        string clientId, LaunchOptions? launch = null, CancellationToken cancellationToken = default)
     {
         EnsureLaunchable(clientId);
 
-        var profile = ResolveProfile(clientId)
-            ?? throw new InvalidOperationException($"No launch profile recorded for '{clientId}'.");
-        if (string.IsNullOrEmpty(profile.ExecutablePath))
-            throw new InvalidOperationException($"'{clientId}' has no recorded executable path to launch.");
+        var profile = ResolveLaunchProfile(clientId, launch);
+        return Task.FromResult(StartTrackedProcess(clientId, profile, launch));
+    }
 
-        var pid = StartProcess(profile);
-        return Task.FromResult(pid);
+    /// <summary>
+    /// Works out what to actually start: the recorded profile, with an agent's overrides
+    /// applied on top and sanity-checked.
+    /// </summary>
+    /// <remarks>
+    /// The guard on <see cref="LaunchOptions.ExePath"/> is a footgun guard, not a security
+    /// boundary — the MCP surface already carries this user's authority, and the hub already
+    /// starts whatever the persisted profile names. What it prevents is an agent quietly
+    /// launching a <i>different application</i> under the name of one the operator knows: the
+    /// worktree case is the same executable in another directory, so a different file name
+    /// means something has gone wrong unless the caller says otherwise.
+    /// </remarks>
+    private KnownClientProfile ResolveLaunchProfile(string clientId, LaunchOptions? launch)
+    {
+        var recorded = ResolveProfile(clientId);
+
+        if (launch?.ExePath is not { Length: > 0 } overridePath)
+        {
+            if (recorded is null)
+                throw new InvalidOperationException($"No launch profile recorded for '{clientId}'.");
+            if (string.IsNullOrEmpty(recorded.ExecutablePath))
+                throw new InvalidOperationException($"'{clientId}' has no recorded executable path to launch.");
+            return recorded;
+        }
+
+        var fullPath = Path.GetFullPath(overridePath);
+        if (!File.Exists(fullPath))
+            throw new InvalidOperationException($"'{fullPath}' does not exist, so there is nothing to launch.");
+
+        if (!launch.AllowDifferentExecutable
+            && recorded?.ExecutablePath is { Length: > 0 } known
+            && !string.Equals(
+                Path.GetFileName(known), Path.GetFileName(fullPath), StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"'{clientId}' is recorded as '{Path.GetFileName(known)}' but you asked to launch "
+                + $"'{Path.GetFileName(fullPath)}'. Launching a different build of the same app from "
+                + "another directory is expected (that is the worktree case) — a different file name "
+                + "usually is not. Pass allowDifferentExecutable=true if you really meant it.");
+        }
+
+        return new KnownClientProfile
+        {
+            AppId = recorded?.AppId ?? StripSuffix(clientId),
+            Host = recorded?.Host,
+            DisplayName = recorded?.DisplayName,
+            ExecutablePath = fullPath,
+            Arguments = launch.Arguments ?? recorded?.Arguments,
+            WorkingDirectory = launch.WorkingDirectory ?? Path.GetDirectoryName(fullPath),
+            ReadOnly = recorded?.ReadOnly ?? false,
+            LastSeenUtc = recorded?.LastSeenUtc ?? DateTimeOffset.UtcNow,
+        };
+    }
+
+    /// <summary>
+    /// Starts a process and remembers that we did, so the registration it produces can be
+    /// handed back to the agent that asked for it.
+    /// </summary>
+    private LaunchResult StartTrackedProcess(
+        string clientId, KnownClientProfile profile, LaunchOptions? launch)
+    {
+        var launchId = Guid.NewGuid().ToString("N");
+        var identity = IdentityOf(StripSuffix(clientId), profile.Host);
+
+        var pid = StartProcess(profile, launchId);
+
+        lock (_gate)
+        {
+            _pendingLaunches[launchId] = new PendingLaunch
+            {
+                LaunchId = launchId,
+                Identity = identity,
+                ProcessId = pid,
+                SessionId = launch?.SessionId,
+                SessionLabel = launch?.SessionLabel,
+                CreatedUtc = DateTimeOffset.UtcNow,
+            };
+        }
+
+        _audit.Add(new AuditEntry
+        {
+            TimestampUtc = DateTimeOffset.UtcNow,
+            ClientId = clientId,
+            ToolName = $"launched '{profile.ExecutablePath}' (pid {pid})",
+            Agent = launch?.SessionLabel,
+            Kind = AuditKind.Launch,
+            Outcome = AuditOutcome.Ok,
+        });
+
+        return new LaunchResult(pid, launchId);
     }
 
     /// <inheritdoc/>
-    public async Task<int> RestartClientAsync(string clientId, CancellationToken cancellationToken = default)
+    public async Task<LaunchResult> RestartClientAsync(
+        string clientId, LaunchOptions? launch = null, CancellationToken cancellationToken = default)
     {
         EnsureLaunchable(clientId);
 
-        // Capture the live pid (if any) so we can terminate the running instance, while
+        // A bare app id is ambiguous the moment more than one instance is up — which is the
+        // normal state once several agents each run their own worktree build. Silently
+        // starting yet another copy (the old behaviour) is the worst answer: the agent
+        // believes it restarted the app it was driving and is now talking to a third one.
+        var targetId = ResolveRestartTarget(clientId);
+
+        // Capture the live session (if any) so we can terminate the running instance, while
         // keeping the reserved hub-id so the relaunched app re-takes the same slot.
-        int? livePid = null;
-        KnownClientProfile? profile;
+        LiveClient? liveClient = null;
         lock (_gate)
         {
-            if (_live.TryGetValue(clientId, out var live))
-                livePid = live.ProcessId;
+            if (targetId is not null && _live.TryGetValue(targetId, out var live))
+                liveClient = live;
         }
-        profile = ResolveProfile(clientId);
 
-        if (profile is null || string.IsNullOrEmpty(profile.ExecutablePath))
-            throw new InvalidOperationException($"'{clientId}' cannot be restarted (no recorded executable path).");
+        var profile = ResolveLaunchProfile(targetId ?? clientId, launch);
 
-        if (livePid is { } pid && pid > 0)
+        if (liveClient?.ProcessId is > 0)
         {
             try
             {
-                using var proc = Process.GetProcessById(pid);
+                using var proc = Process.GetProcessById(liveClient.ProcessId);
                 proc.Kill(entireProcessTree: true);
                 await proc.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
             }
@@ -909,24 +1085,76 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
             catch (InvalidOperationException) { /* already exited */ }
         }
 
-        return StartProcess(profile);
+        // Retire the old session from the registry NOW rather than waiting for its receive
+        // loop to notice the transport closed. Otherwise the instance we just killed is still
+        // listed as connected for a moment, and the caller's very next
+        // hub_wait_for_client — the natural way to wait for the app to come back — resolves
+        // against the corpse and reports success before the replacement has even started.
+        if (liveClient is not null)
+        {
+            try { liveClient.Channel.Dispose(); } catch { /* already dead */ }
+            Disconnect(liveClient, graceful: false, reason: "restarted by the hub");
+        }
+
+        // Relaunch through the tracked path so the new process — which has a new pid — is
+        // re-associated with the same agent, and its claim (keyed on the hub id, which the
+        // reconnect reclaims) carries straight over.
+        return StartTrackedProcess(targetId ?? clientId, profile, launch);
+    }
+
+    /// <summary>
+    /// Resolves which instance a restart means. An exact hub id is taken at face value; a
+    /// bare app id resolves only when it is unambiguous.
+    /// </summary>
+    private string? ResolveRestartTarget(string clientId)
+    {
+        lock (_gate)
+        {
+            if (_live.ContainsKey(clientId) || _seen.ContainsKey(clientId))
+                return clientId;
+
+            var candidates = _live.Values
+                .Where(c => string.Equals(c.AppId, clientId, StringComparison.OrdinalIgnoreCase)
+                            || string.Equals(c.IdentityKey, clientId, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(c => c.ClientId, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (candidates.Count == 0)
+                return null; // nothing running: treat as a plain launch
+            if (candidates.Count == 1)
+                return candidates[0].ClientId;
+
+            throw new InvalidOperationException(
+                $"'{clientId}' matches {candidates.Count} running instances "
+                + $"({string.Join(", ", candidates.Select(c => c.ClientId))}). "
+                + "Name the one you mean — restarting the wrong instance would interrupt "
+                + "whichever agent is driving it.");
+        }
     }
 
     /// <inheritdoc/>
-    public async Task<ClientInfo?> WaitForClientAsync(
+    public Task<ClientInfo?> WaitForClientAsync(
         string? appIdOrClientId, TimeSpan timeout, CancellationToken cancellationToken = default)
+        => WaitForClientAsync(
+            new ClientWaitFilter { IdOrAppId = appIdOrClientId }, timeout, cancellationToken);
+
+    /// <inheritdoc/>
+    public async Task<ClientInfo?> WaitForClientAsync(
+        ClientWaitFilter filter, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(filter);
+
         // Fast path: already connected? Return without awaiting any event. Doing this
         // BEFORE subscribing closes the race where the client connects between the check
         // and the subscription (event-driven brokers' classic lost-wakeup).
-        if (FindConnectedMatch(appIdOrClientId) is { } already)
+        if (FindConnectedMatch(filter) is { } already)
             return already;
 
         var tcs = new TaskCompletionSource<ClientInfo>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         void OnConnected(object? _, ClientInfo info)
         {
-            if (Matches(info, appIdOrClientId))
+            if (Matches(info, filter, ClaimOwnerOf(info.ClientId)))
                 tcs.TrySetResult(info);
         }
 
@@ -935,7 +1163,7 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
         {
             // Re-check after subscribing: a connect that landed in the tiny window between
             // the fast-path check and the subscription is recovered here.
-            if (FindConnectedMatch(appIdOrClientId) is { } raced)
+            if (FindConnectedMatch(filter) is { } raced)
                 return raced;
 
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -959,21 +1187,60 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
         }
     }
 
-    // The first connected client matching the filter, or null. A null/empty filter
-    // matches any connected client; otherwise the hub-id or bare app-id must match.
-    private ClientInfo? FindConnectedMatch(string? appIdOrClientId)
+    /// <summary>
+    /// The best connected client matching the filter, or null.
+    /// </summary>
+    /// <remarks>
+    /// The ordering is the point, and it is documented on <c>hub_wait_for_client</c>: an exact
+    /// hub-id match first, then an instance the asking agent already owns, then one nobody
+    /// owns, then the rest — each group by ascending instance number. Enumeration order used
+    /// to decide this, which meant a bare app id resolved to an arbitrary instance; with
+    /// several agents each running their own build, arbitrary means "sometimes somebody
+    /// else's app, silently".
+    /// </remarks>
+    private ClientInfo? FindConnectedMatch(ClientWaitFilter filter)
     {
         lock (_gate)
         {
+            var matches = new List<(ClientInfo info, int rank)>();
             foreach (var c in _live.Values)
             {
                 var info = Snapshot_NoLock(c);
-                if (Matches(info, appIdOrClientId))
-                    return info;
+                var owner = ClaimOwnerOf(info.ClientId);
+                if (!Matches(info, filter, owner))
+                    continue;
+
+                var rank =
+                    string.Equals(info.ClientId, filter.IdOrAppId, StringComparison.OrdinalIgnoreCase) ? 0
+                    : IsMine(info, owner, filter.SessionId) ? 1
+                    : owner is null ? 2
+                    : 3;
+                matches.Add((info, rank));
             }
+
+            return matches
+                .OrderBy(m => m.rank)
+                .ThenBy(m => m.info.ClientId, StringComparer.OrdinalIgnoreCase)
+                .Select(m => m.info)
+                .FirstOrDefault();
         }
-        return null;
     }
+
+    /// <summary>The agent driving a client, when the hub is tracking claims at all.</summary>
+    private ClaimInfo? ClaimOwnerOf(string clientId) => Claims?.Get(clientId);
+
+    /// <summary>
+    /// Whether an instance belongs to the asking agent — either it is driving it, or it asked
+    /// the hub to launch it.
+    /// </summary>
+    private static bool IsMine(ClientInfo info, ClaimInfo? owner, Guid? sessionId) =>
+        sessionId is { } id && (owner?.SessionId == id || info.LaunchSessionId == id);
+
+    /// <summary>
+    /// The claim registry, when one has been attached. Null in hosts that never wired one up
+    /// (older tests), in which case every instance simply reads as unclaimed.
+    /// </summary>
+    public ClientClaimRegistry? Claims { get; set; }
 
     /// <summary>
     /// Whether a client snapshot satisfies a wait filter. A null/empty filter matches any
@@ -986,12 +1253,32 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     /// but with a local instance also running it would be a coin toss which one resolves.
     /// The middle form is how a caller says which they meant without pinning an instance number.
     /// </remarks>
-    private static bool Matches(ClientInfo info, string? appIdOrClientId)
+    private static bool Matches(ClientInfo info, ClientWaitFilter filter, ClaimInfo? owner)
     {
-        if (string.IsNullOrWhiteSpace(appIdOrClientId))
-            return info.IsConnected;
         if (!info.IsConnected)
             return false;
+
+        // A launch id names exactly one instance, so it answers on its own — that is the
+        // whole point of handing one back from hub_launch_client.
+        if (filter.LaunchId is { Length: > 0 } launchId)
+            return string.Equals(info.LaunchId, launchId, StringComparison.Ordinal);
+
+        if (filter.ProcessId is { } pid && info.ProcessId != pid)
+            return false;
+
+        if (filter.UnclaimedOnly && owner is not null)
+            return false;
+
+        if (filter.MineOnly && !IsMine(info, owner, filter.SessionId))
+            return false;
+
+        return MatchesId(info, filter.IdOrAppId);
+    }
+
+    private static bool MatchesId(ClientInfo info, string? appIdOrClientId)
+    {
+        if (string.IsNullOrWhiteSpace(appIdOrClientId))
+            return true;
 
         if (string.Equals(info.ClientId, appIdOrClientId, StringComparison.OrdinalIgnoreCase)
             || string.Equals(info.AppId, appIdOrClientId, StringComparison.OrdinalIgnoreCase))
@@ -1007,6 +1294,8 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     public event EventHandler<ClientInfo>? ClientUpdated;
     /// <inheritdoc/>
     public event EventHandler<ClientInfo>? ClientDown;
+    /// <inheritdoc/>
+    public event EventHandler<ClientInfo>? LaunchRegistered;
 
     // ===================================================================== read-only toggle
 
@@ -1025,7 +1314,7 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     /// to re-authorise after every blip made the permission meaningless in practice.
     /// </para>
     /// </remarks>
-    public void SetReadOnly(string clientId, bool readOnly)
+    public void SetReadOnly(string clientId, bool readOnly, string? agent = null)
     {
         ClientInfo? info = null;
         string? identity = null;
@@ -1052,7 +1341,7 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
             _audit.Add(Remote.RemoteAudit.Entry(
                 AuditKind.Escalate,
                 readOnly ? $"'{clientId}' set read-only" : $"'{clientId}' allowed to accept mutating tools",
-                clientId: clientId, host: info.Host, transport: info.Transport));
+                clientId: clientId, host: info.Host, transport: info.Transport) with { Agent = agent });
             ClientUpdated?.Invoke(this, info);
         }
     }
@@ -1164,6 +1453,9 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
         Host = c.Host,
         MachineId = c.MachineId,
         CanLaunch = c.CanLaunch,
+        LaunchId = c.LaunchId,
+        LaunchSessionId = c.LaunchSessionId,
+        LaunchSessionLabel = c.LaunchSessionLabel,
     };
 
     /// <summary>The longest app id the hub will accept; longer ids are truncated.</summary>
@@ -1213,40 +1505,12 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     }
 
     /// <summary>
-    /// Whether a read-only client may still run <paramref name="toolName"/>.
+    /// Whether a read-only client may still run <paramref name="toolName"/>. The rule lives
+    /// in <see cref="ToolClassification"/> so this gate and the hub's write-claim gate can
+    /// never drift apart about what counts as a mutating call.
     /// </summary>
-    /// <remarks>
-    /// <para>
-    /// The client's own <see cref="ToolDescriptor.ReadOnly"/> wins when it reported one: it
-    /// owns the tool implementations and already computes this to enforce its local gate,
-    /// so it is the authority. This method previously claimed to prefer the client's
-    /// annotation but never actually looked at it, leaving a bare name allow-list that
-    /// refused genuinely side-effect-free tools — <c>describe_screen</c>,
-    /// <c>wait_for_idle</c> (the list only matched <c>wait_for</c> exactly) and
-    /// <c>keincheck_guide</c> among them.
-    /// </para>
-    /// <para>
-    /// The name heuristic remains only as the fallback for v1 clients that predate the
-    /// field, and stays deliberately fail-closed: anything it does not recognise counts as
-    /// mutating. That default matters more than it used to, because remote clients start
-    /// read-only.
-    /// </para>
-    /// </remarks>
     private static bool IsReadOnlyTool(LiveClient client, string toolName)
-    {
-        foreach (var tool in client.Tools)
-        {
-            if (!string.Equals(tool.Name, toolName, StringComparison.Ordinal))
-                continue;
-            if (tool.ReadOnly is { } declared)
-                return declared;
-            break; // known tool, but the client did not classify it — fall through
-        }
-
-        return toolName.StartsWith("get_", StringComparison.Ordinal)
-            || toolName is "list_windows" or "query_controls" or "hit_test" or "wait_for"
-            || toolName.StartsWith("screenshot_", StringComparison.Ordinal);
-    }
+        => ToolClassification.IsReadOnly(client.Tools, toolName);
 
     private static (string? path, string? args, string? cwd) ResolveProcessProfile(int pid)
     {
@@ -1264,20 +1528,58 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
         }
     }
 
-    private static int StartProcess(KnownClientProfile profile)
+    /// <summary>
+    /// Starts the app, tagging it with <paramref name="launchId"/> so the process can identify
+    /// which launch it came from when it registers.
+    /// </summary>
+    /// <remarks>
+    /// Passing an environment variable requires <c>UseShellExecute=false</c>, which cannot
+    /// start non-executable targets (a document, a shortcut). Recorded profiles are real
+    /// executables in practice, but rather than assume it, a failure falls back to the old
+    /// shell-execute launch without the token — the launch still works, and correlation falls
+    /// back to matching on process id.
+    /// </remarks>
+    private int StartProcess(KnownClientProfile profile, string? launchId = null)
     {
         var psi = new ProcessStartInfo
         {
             FileName = profile.ExecutablePath!,
-            UseShellExecute = true,
+            UseShellExecute = launchId is null,
         };
         if (!string.IsNullOrEmpty(profile.Arguments))
             psi.Arguments = profile.Arguments;
         if (!string.IsNullOrEmpty(profile.WorkingDirectory) && Directory.Exists(profile.WorkingDirectory))
             psi.WorkingDirectory = profile.WorkingDirectory;
 
+        if (launchId is null)
+            return Start(psi);
+
+        psi.Environment[PipeNames.LaunchTokenEnvVar] = launchId;
+        try
+        {
+            return Start(psi);
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            var shell = new ProcessStartInfo
+            {
+                FileName = psi.FileName,
+                Arguments = psi.Arguments,
+                WorkingDirectory = psi.WorkingDirectory,
+                UseShellExecute = true,
+            };
+            return Start(shell);
+        }
+    }
+
+    /// <summary>Starts a process through the configured starter (the test seam), or the OS.</summary>
+    private int Start(ProcessStartInfo psi)
+    {
+        if (_options.ProcessStarter is { } custom)
+            return custom(psi);
+
         var proc = Process.Start(psi)
-            ?? throw new InvalidOperationException($"Failed to start '{profile.ExecutablePath}'.");
+            ?? throw new InvalidOperationException($"Failed to start '{psi.FileName}'.");
         return proc.Id;
     }
 
@@ -1305,6 +1607,28 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
     }
 
     // ===================================================================== nested
+
+    /// <summary>
+    /// A process the hub started on an agent's behalf, waiting to be matched to the
+    /// registration it produces.
+    /// </summary>
+    private sealed class PendingLaunch
+    {
+        public required string LaunchId { get; init; }
+
+        /// <summary>The app identity this launch was for, so a pid match cannot cross apps.</summary>
+        public required string Identity { get; init; }
+
+        /// <summary>The pid the hub started — the fallback match for clients with no token.</summary>
+        public required int ProcessId { get; init; }
+
+        /// <summary>The agent that asked for it, and will be given the instance.</summary>
+        public Guid? SessionId { get; init; }
+
+        public string? SessionLabel { get; init; }
+
+        public required DateTimeOffset CreatedUtc { get; init; }
+    }
 
     /// <summary>A live pipe session for one connected client.</summary>
     private sealed class LiveClient
@@ -1348,6 +1672,15 @@ public sealed class PipeClientBroker : IClientBroker, IAsyncDisposable
         /// the machine blips, and <c>_seen</c> grows without bound.
         /// </remarks>
         public string IdentityKey { get; set; } = string.Empty;
+
+        /// <summary>The launch this instance came from, when the hub started it for an agent.</summary>
+        public string? LaunchId { get; set; }
+
+        /// <summary>The agent session that asked for this instance.</summary>
+        public Guid? LaunchSessionId { get; set; }
+
+        /// <summary>That agent's display label.</summary>
+        public string? LaunchSessionLabel { get; set; }
 
         // Correlation table: correlationId -> awaiting invoke.
         public ConcurrentDictionary<string, TaskCompletionSource<ToolResultMessage>> Pending { get; } = new();

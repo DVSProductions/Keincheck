@@ -84,7 +84,7 @@ public sealed class HubMetaToolTests
     public async Task Catalog_Advertises_All_Six_MetaTools()
     {
         var broker = BrokerWithClient();
-        broker.ActiveClientId = "app1";
+        broker.DefaultClientId = "app1";
         var (client, hub, cts, serverTask) = await ConnectAsync(broker);
         try
         {
@@ -143,7 +143,7 @@ public sealed class HubMetaToolTests
                     JsonDocument.Parse("""{"type":"object","properties":{}}""").RootElement.Clone() },
             },
         });
-        broker.ActiveClientId = "app1";
+        broker.DefaultClientId = "app1";
 
         string? invokedClient = null;
         string? forwardedArgs = null;
@@ -175,7 +175,7 @@ public sealed class HubMetaToolTests
     public async Task Call_To_Down_Client_Returns_Structured_Recovery_Error()
     {
         var broker = BrokerWithClient();
-        broker.ActiveClientId = "app1";
+        broker.DefaultClientId = "app1";
         // Now mark it down AFTER selecting — the catalog still lists it from list_known.
         broker.MarkDown("app1");
 
@@ -222,7 +222,7 @@ public sealed class HubMetaToolTests
     public async Task ClientDown_Pushes_Logging_Notification_Naming_Restart()
     {
         var broker = BrokerWithClient();
-        broker.ActiveClientId = "app1";
+        broker.DefaultClientId = "app1";
         var (client, hub, cts, serverTask) = await ConnectAsync(broker);
         try
         {
@@ -264,7 +264,7 @@ public sealed class HubMetaToolTests
         // The meta-tool must surface in the advertised tools/list (exercises BuildCatalog +
         // IsMetaTool through the real MCP surface, mirroring Catalog_Advertises_All_Six).
         var broker = BrokerWithClient();
-        broker.ActiveClientId = "app1";
+        broker.DefaultClientId = "app1";
         var (client, hub, cts, serverTask) = await ConnectAsync(broker);
         try
         {
@@ -326,7 +326,7 @@ public sealed class HubMetaToolTests
         // The meta-tool must surface in the advertised tools/list (exercises BuildCatalog +
         // IsMetaTool through the real MCP surface, mirroring Catalog_Advertises_WaitForClient).
         var broker = BrokerWithClient();
-        broker.ActiveClientId = "app1";
+        broker.DefaultClientId = "app1";
         var (client, hub, cts, serverTask) = await ConnectAsync(broker);
         try
         {
@@ -341,7 +341,7 @@ public sealed class HubMetaToolTests
     public async Task HubStatus_Reports_Version_Protocol_Active_And_Count()
     {
         var broker = BrokerWithClient(id: "app1", connected: true);
-        broker.ActiveClientId = "app1";
+        broker.DefaultClientId = "app1";
         var (client, hub, cts, serverTask) = await ConnectAsync(broker);
         try
         {

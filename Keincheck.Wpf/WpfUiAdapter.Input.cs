@@ -215,18 +215,15 @@ public sealed partial class WpfUiAdapter
 
     private static void RaisePressed(UIElement target, Point point, MouseButton button, int clickCount)
     {
-        // WPF's input system promotes the generic MouseDownEvent to the button-specific
-        // MouseLeftButtonDownEvent/MouseRightButtonDownEvent. When raising manually we drive
-        // the button-specific event directly so OnMouseLeftButtonDown (the GaugeControl's
-        // hook) and ButtonBase's Click promotion both fire, then also raise the generic
-        // MouseDownEvent for handlers attached to it.
-        var down = new MouseButtonEventArgs(InputManager.Current.PrimaryMouseDevice, Timestamp(), button)
-        {
-            RoutedEvent = ButtonDownEvent(button),
-            Source = target,
-        };
-        target.RaiseEvent(down);
-
+        // Raise ONLY the generic Mouse.MouseDownEvent and let WPF promote it to the
+        // button-specific MouseLeftButtonDownEvent, exactly as real input does.
+        //
+        // Raising both — which this used to do, on the assumption that a manually raised
+        // event would not be promoted — delivered every synthetic click TWICE: the direct
+        // raise fired OnMouseLeftButtonDown once, and UIElement's class handler for
+        // MouseDownEvent promoted the generic one into a second. A single click_at advanced
+        // the WPF demo's gauge two notches, and nothing noticed because the adapter's only
+        // coverage drove controls through UI Automation rather than synthetic pointer input.
         var generic = new MouseButtonEventArgs(InputManager.Current.PrimaryMouseDevice, Timestamp(), button)
         {
             RoutedEvent = Mouse.MouseDownEvent,
@@ -237,13 +234,8 @@ public sealed partial class WpfUiAdapter
 
     private static void RaiseReleased(UIElement target, Point point, MouseButton button)
     {
-        var up = new MouseButtonEventArgs(InputManager.Current.PrimaryMouseDevice, Timestamp(), button)
-        {
-            RoutedEvent = ButtonUpEvent(button),
-            Source = target,
-        };
-        target.RaiseEvent(up);
-
+        // Same promotion as the press: the generic event alone yields exactly one
+        // MouseLeftButtonUp, which is what ButtonBase turns into a single Click.
         var generic = new MouseButtonEventArgs(InputManager.Current.PrimaryMouseDevice, Timestamp(), button)
         {
             RoutedEvent = Mouse.MouseUpEvent,

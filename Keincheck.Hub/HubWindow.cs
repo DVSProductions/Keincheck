@@ -347,7 +347,7 @@ public sealed class HubWindow : Window
     {
         var grid = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto,Auto"),
+            ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto,Auto,Auto"),
             Margin = new Thickness(2, 4),
         };
 
@@ -373,6 +373,24 @@ public sealed class HubWindow : Window
         Grid.SetColumn(activate, 1);
         grid.Children.Add(activate);
 
+        // Release the write-claim. Only one agent at a time may drive an app, and the claim
+        // is normally released when that agent disconnects — so this is the operator's way
+        // out of the one case that cannot resolve itself: an agent that died without its
+        // transport closing still holds the app until the idle timeout. Enabled only while
+        // somebody actually holds it, so the button never invites a no-op.
+        var release = new Button
+        {
+            Content = "Release",
+            Margin = new Thickness(4, 0, 0, 0),
+            [!Button.IsEnabledProperty] = new Binding(nameof(ClientRow.IsClaimed)) { Mode = BindingMode.OneWay },
+        };
+        ToolTip.SetTip(release,
+            "Free this app from the agent currently driving it, so another agent can take over. "
+            + "Use when an agent has gone away without releasing.");
+        release.Click += (_, _) => _vm.ReleaseClaim(row.ClientId);
+        Grid.SetColumn(release, 2);
+        grid.Children.Add(release);
+
         // launch / restart -- disabled for a remote client, whose process is on another
         // machine. The broker refuses these anyway; greying them out means the operator is
         // never left wondering why a button did nothing.
@@ -385,7 +403,7 @@ public sealed class HubWindow : Window
         if (!row.CanLaunch)
             ToolTip.SetTip(launch, "This client is on another machine; the hub cannot start processes there.");
         launch.Click += async (_, _) => await _vm.LaunchAsync(row.ClientId);
-        Grid.SetColumn(launch, 2);
+        Grid.SetColumn(launch, 3);
         grid.Children.Add(launch);
 
         var restart = new Button
@@ -397,7 +415,7 @@ public sealed class HubWindow : Window
         if (!row.CanLaunch)
             ToolTip.SetTip(restart, "This client is on another machine; the hub cannot restart it.");
         restart.Click += async (_, _) => await _vm.RestartAsync(row.ClientId);
-        Grid.SetColumn(restart, 3);
+        Grid.SetColumn(restart, 4);
         grid.Children.Add(restart);
 
         // read-only toggle
@@ -414,7 +432,7 @@ public sealed class HubWindow : Window
             if (v != row.ReadOnly)
                 _vm.SetReadOnly(row.ClientId, v);
         };
-        Grid.SetColumn(readOnly, 4);
+        Grid.SetColumn(readOnly, 5);
         grid.Children.Add(readOnly);
 
         return grid;

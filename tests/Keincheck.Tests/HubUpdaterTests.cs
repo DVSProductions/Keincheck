@@ -110,14 +110,16 @@ public sealed class HubUpdaterTests
 #pragma warning disable CS0067 // required by the interface, unused by this fake
         public event EventHandler<ClientInfo>? ClientConnected;
         public event EventHandler<ClientInfo>? ClientUpdated;
+        public event EventHandler<ClientInfo>? LaunchRegistered;
 #pragma warning restore CS0067
 
-        public string? ActiveClientId { get; set; }
+        public string? DefaultClientId { get; set; }
         public IReadOnlyList<ClientInfo> ListKnownClients() => _clients;
         public ClientInfo? ClientStatus(string clientId) => null;
-        public Task<int> LaunchClientAsync(string clientId, CancellationToken ct = default) => throw new NotSupportedException();
-        public Task<int> RestartClientAsync(string clientId, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<LaunchResult> LaunchClientAsync(string clientId, LaunchOptions? launch = null, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<LaunchResult> RestartClientAsync(string clientId, LaunchOptions? launch = null, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<ClientInfo?> WaitForClientAsync(string? appIdOrClientId, TimeSpan timeout, CancellationToken ct = default) => throw new NotSupportedException();
-        public Task<ToolResultMessage> InvokeOnClientAsync(string clientId, string toolName, JsonElement? argumentsJson, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<ClientInfo?> WaitForClientAsync(ClientWaitFilter filter, TimeSpan timeout, CancellationToken ct = default) => throw new NotSupportedException();
+        public Task<ToolResultMessage> InvokeOnClientAsync(string clientId, string toolName, JsonElement? argumentsJson, CancellationToken ct = default, string? agent = null) => throw new NotSupportedException();
     }
 }

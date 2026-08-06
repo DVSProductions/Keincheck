@@ -122,6 +122,7 @@ returns the whole workflow as a document the model can read before touching anyt
 | *Discover & select* | `hub_guide`, `hub_list_clients`, `hub_list_known_clients`, `hub_client_status`, `hub_select_client`, `hub_wait_for_client`, `hub_status` |
 | *Lifecycle* | `hub_launch_client`, `hub_restart_client` |
 | *Permissions* | `hub_set_readonly` — allow or refuse mutating tools per client |
+| *[Sharing a hub](#several-agents-at-once)* | `hub_claim_client`, `hub_release_client` — who may drive an app when several agents are connected |
 | *Record & replay* | `hub_record_start`, `hub_record_stop`, `hub_record_status`, `hub_replay`, `hub_export_test` |
 | *Static tooling* | `hub_list_client_tools`, `hub_call_tool` — discover and call a client's tools by name, for agents that don't support dynamic tool lists |
 | *[Remote](#remote)* | `hub_remote_status`, `hub_remote_enable`, `hub_remote_disable`, `hub_remote_issue`, `hub_remote_revoke` |
@@ -139,6 +140,60 @@ offered, and no list-changed notifications are sent. Discover a client's tools w
 hub_call_tool({ "tool": "query_controls", "args": { "selector": "Button" } })
 // "client" targets a specific client; omit it to use the active one.
 ```
+
+<a id="several-agents-at-once"></a>
+### Several agents at once
+
+The hub is **one process per machine user**, so every AI agent running as you shares it —
+several editor windows, a CI job, whatever else is open. That is deliberate (one place that
+knows about every app), and the hub keeps them out of each other's way:
+
+- **Selection is per agent.** Each MCP session has its own active client, its own advertised
+  tool list, and its own recording. One agent calling `hub_select_client` never retargets
+  another's calls. `hub_status` reports your own selection plus your agent label.
+- **One driver per app instance.** Reads stay open to everyone; the first *mutating* call
+  claims that instance, and it is released when you disconnect (or via `hub_release_client`).
+  A second agent's write fails with a structured `client_claimed` error naming the owner and
+  listing the ways out. Apps cannot safely take input from two drivers — pointer capture,
+  focus and control handles are all process-global — so this is enforced rather than assumed.
+- **Launch affinity for worktrees.** The common setup is one worktree per agent, each with its
+  own build of the same app. Pass `exePath` to `hub_launch_client` to start *your* build; the
+  hub remembers who asked, selects and claims that instance for you alone, and returns a
+  `launchId` so `hub_wait_for_client { launchId }` resolves exactly it — where waiting on
+  `appId` might hand you a colleague's copy.
+
+The tray window shows every connected agent and what each is driving, and each client row has
+a **Release** button that frees an app whose agent went away without releasing it. Set
+`EnforceWriteClaims = false` to turn the driving rule off entirely.
+
+#### Upgrading from 0.11
+
+Single-agent use is unchanged, but four behaviours moved. All four were previously
+hub-wide and are now per-agent or stricter:
+
+- **Recordings belong to your session** and are discarded when it ends. Call
+  `hub_export_test` before disconnecting if you want to keep one. Previously the buffer was
+  hub-wide and outlived the agent that made it.
+- **`hub_status.activeClientId` is your own selection**, not the hub's. A second agent
+  selecting a different app no longer changes what your calls target.
+- **`hub_restart_client` with a bare app id is refused when several instances are running.**
+  It used to silently start another copy, leaving you driving an instance you never asked
+  for. Name the instance (`myapp#2`), or restart is unambiguous with only one running.
+- **A second agent's mutating calls are refused** with a structured `client_claimed` error
+  while another agent is driving that instance. Reads are unaffected.
+
+One change is in an adapter package rather than the hub, and it affects **WPF apps only**:
+
+- **`click_at`, `pointer` and `scroll_at` now deliver one event instead of two.** The WPF
+  adapter raised both the button-specific mouse event and the generic one, and WPF promotes
+  the generic one back into the button-specific event — so every synthetic click arrived
+  twice. If a script was written against the doubled behaviour (a counter that advanced two
+  steps per click, say), it will now see one. UI-Automation driving (`automation_action`) was
+  never affected, and Avalonia was never affected.
+
+A client built against 0.11 works unchanged against a 0.12 hub, and vice versa: the only
+wire change is one optional field, and a hub that does not receive it falls back to matching
+a launch on process id.
 
 **Addressing:** stable per-session handles (`ctl-1a`) plus a CSS-ish selector engine
 (`Button[Name=Save]`, `#Save`, `.toolGroup`, `Button.primary`, `StackPanel > TextBox`).
@@ -339,8 +394,16 @@ Keincheck grants full programmatic control of an app's UI. It is designed for
 **local, trusted** development and automation:
 
 - **Broker:** the control pipe is **current-user only**; the hub's MCP endpoint is bound to
-  **loopback only**. The hub shows an "AI is driving _X_" indicator and offers a per-app
-  **read-only** toggle (mutating tools are refused) and an audit log of every call.
+  **loopback only**. The hub lists every connected agent and what each is driving, and offers
+  a per-app **read-only** toggle (mutating tools are refused) and an audit log of every call,
+  attributed to the agent that made it.
+- **Starting processes:** `hub_launch_client` accepts an `exePath`, so an agent can ask the
+  hub to start a build other than the one it has on file — the multi-worktree case. The hub
+  refuses a path whose *file name* differs from the recorded one unless the caller passes
+  `allowDifferentExecutable`, which makes launching an unrelated binary a deliberate act
+  rather than a typo. This does not move the boundary — the MCP endpoint already carries
+  your user's authority, and anything running as you can start a process anyway — but it is
+  a new path to it, and every launch is recorded in the audit log with its resolved path.
 - **Embedded:** the listener is **loopback only** (never `0.0.0.0`), but there is **no auth
   token** — any local process can drive the app. Enable it only in development / trusted
   contexts, ideally behind a debug-only flag.

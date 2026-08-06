@@ -39,7 +39,7 @@ public sealed class App : Application
             // Stay alive when the window is closed; the tray icon is the real lifetime.
             desktop.ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
-            _vm = new HubViewModel(_broker);
+            _vm = new HubViewModel(_broker, HubRuntime.Mcp);
             _window = new HubWindow(_vm);
             _window.Closing += (_, e) =>
             {

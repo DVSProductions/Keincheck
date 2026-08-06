@@ -308,11 +308,11 @@ public sealed class RemoteBrokerTests
         await using var broker = NewBroker();
         var (client, serve, cts, info) = await RegisterAsync(broker, "myapp", RemoteContext);
 
-        Assert.Null(broker.ActiveClientId);
+        Assert.Null(broker.DefaultClientId);
 
         // It becomes active only when explicitly selected.
-        broker.ActiveClientId = info.ClientId;
-        Assert.Equal(info.ClientId, broker.ActiveClientId);
+        broker.DefaultClientId = info.ClientId;
+        Assert.Equal(info.ClientId, broker.DefaultClientId);
 
         await Cleanup(client, serve, cts);
     }
@@ -322,10 +322,10 @@ public sealed class RemoteBrokerTests
     {
         await using var broker = NewBroker();
         var local = await RegisterAsync(broker, "localapp", ClientSessionContext.LocalPipe);
-        Assert.Equal(local.Info.ClientId, broker.ActiveClientId);
+        Assert.Equal(local.Info.ClientId, broker.DefaultClientId);
 
         var remote = await RegisterAsync(broker, "myapp", RemoteContext);
-        Assert.Equal(local.Info.ClientId, broker.ActiveClientId);
+        Assert.Equal(local.Info.ClientId, broker.DefaultClientId);
 
         await Cleanup(local.Channel, local.Serve, local.Cts);
         await Cleanup(remote.Channel, remote.Serve, remote.Cts);
@@ -337,7 +337,7 @@ public sealed class RemoteBrokerTests
         await using var broker = NewBroker();
         var (client, serve, cts, info) = await RegisterAsync(broker, "localapp", ClientSessionContext.LocalPipe);
 
-        Assert.Equal(info.ClientId, broker.ActiveClientId);
+        Assert.Equal(info.ClientId, broker.DefaultClientId);
         await Cleanup(client, serve, cts);
     }
 

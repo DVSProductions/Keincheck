@@ -55,7 +55,7 @@ public sealed class PipeClientBrokerTests
         Assert.True(info.IsConnected);
 
         // First client auto-becomes active.
-        Assert.Equal("demo#1", broker.ActiveClientId);
+        Assert.Equal("demo#1", broker.DefaultClientId);
 
         await client.SendAsync(MessageKind.ToolList, new ToolListMessage
         {
@@ -182,21 +182,21 @@ public sealed class PipeClientBrokerTests
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
 
         // Connect: the first client auto-becomes active. (Auto-activate runs in a second
-        // lock block AFTER the snapshot is published, so poll on ActiveClientId, not on
+        // lock block AFTER the snapshot is published, so poll on DefaultClientId, not on
         // ClientStatus, to avoid the tiny window between the two.)
         var (c1, b1) = DuplexPair();
         var s1 = broker.AcceptChannel(b1, cts.Token);
         await c1.SendAsync(MessageKind.Register, new RegisterMessage
         { ClientId = "app", ProcessId = 42, ProtocolVersion = ProtocolVersion.Current });
-        await WaitFor(() => broker.ActiveClientId == "app#1" ? "active" : null);
-        Assert.Equal("app#1", broker.ActiveClientId);
+        await WaitFor(() => broker.DefaultClientId == "app#1" ? "active" : null);
+        Assert.Equal("app#1", broker.DefaultClientId);
 
         // Drop it. The broker observes the EOF, moves it to _seen, and clears _active while
         // remembering it as the auto-reselect target.
         await c1.DisposeAsync();
         try { await s1; } catch { }
-        await WaitFor(() => broker.ActiveClientId is null ? "down" : null);
-        Assert.Null(broker.ActiveClientId);
+        await WaitFor(() => broker.DefaultClientId is null ? "down" : null);
+        Assert.Null(broker.DefaultClientId);
         Assert.DoesNotContain(broker.ListClients(), c => c.ClientId == "app#1");
 
         // Watch for the re-activation nudge (ClientUpdated) the auto-reselect fires.
@@ -215,7 +215,7 @@ public sealed class PipeClientBrokerTests
 
         var info = await reactivated.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal("app#1", info.ClientId);
-        Assert.Equal("app#1", broker.ActiveClientId);
+        Assert.Equal("app#1", broker.DefaultClientId);
 
         cts.Cancel();
         await c2.DisposeAsync();
@@ -247,15 +247,15 @@ public sealed class PipeClientBrokerTests
         await WaitFor(() => broker.ClientStatus("beta#1"));
 
         // Make alpha the deliberately-active client, then drop it.
-        broker.ActiveClientId = "alpha#1";
-        Assert.Equal("alpha#1", broker.ActiveClientId);
+        broker.DefaultClientId = "alpha#1";
+        Assert.Equal("alpha#1", broker.DefaultClientId);
         await ca.DisposeAsync();
         try { await sa; } catch { }
-        await WaitFor(() => broker.ActiveClientId is null ? "down" : null);
+        await WaitFor(() => broker.DefaultClientId is null ? "down" : null);
 
         // While alpha is down, the user manually selects beta.
-        broker.ActiveClientId = "beta#1";
-        Assert.Equal("beta#1", broker.ActiveClientId);
+        broker.DefaultClientId = "beta#1";
+        Assert.Equal("beta#1", broker.DefaultClientId);
 
         // alpha reconnects: it must NOT steal active back from the deliberate beta selection.
         var (ca2, ba2) = DuplexPair();
@@ -265,7 +265,7 @@ public sealed class PipeClientBrokerTests
         await WaitFor(() => broker.ListClients().Any(c => c.ClientId == "alpha#1") ? "back" : null);
 
         // beta stays active despite alpha's reconnect.
-        Assert.Equal("beta#1", broker.ActiveClientId);
+        Assert.Equal("beta#1", broker.DefaultClientId);
 
         cts.Cancel();
         await ca2.DisposeAsync();

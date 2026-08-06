@@ -59,4 +59,24 @@ public sealed class HubOptions
 
     /// <summary>How often the auto-updater polls for a newer release. Default 1 hour.</summary>
     public TimeSpan UpdateCheckInterval { get; set; } = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// How long an agent's write-claim on an app may sit untouched before another agent's
+    /// mutating call may take it over. <see cref="Timeout.InfiniteTimeSpan"/> disables idle
+    /// release. Default 15 minutes.
+    /// </summary>
+    /// <remarks>
+    /// Long enough that an agent thinking, reading code, or waiting on a build does not lose
+    /// the app it is driving; short enough that an agent which crashed without closing its
+    /// transport does not wedge that app until the hub restarts. An agent that is genuinely
+    /// finished should call <c>hub_release_client</c> rather than wait this out.
+    /// </remarks>
+    public TimeSpan ClaimIdleTimeout { get; set; } = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// When true (default), only one agent at a time may drive a given app instance. Turn it
+    /// off to restore the previous free-for-all, in which concurrent agents can interleave
+    /// pointer and keyboard input into one app and corrupt each other's capture and focus.
+    /// </summary>
+    public bool EnforceWriteClaims { get; set; } = true;
 }

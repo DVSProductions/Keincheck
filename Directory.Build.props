@@ -20,7 +20,7 @@
        Do NOT re-add a <Version> to an individual csproj: it silently wins over this one, and
        seven copies of a version number is seven chances to bump six of them. -->
   <PropertyGroup>
-    <Version>0.11.1</Version>
+    <Version>0.12.0</Version>
     <Authors>Valentino Saitz</Authors>
     <Company>DVSProductions</Company>
     <Product>Keincheck</Product>

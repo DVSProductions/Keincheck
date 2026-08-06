@@ -230,7 +230,7 @@ public sealed class RemoteHardeningTests : IDisposable
                 new ToolDescriptor { Name = "get_logical_tree", Description = "legitimate" },
             ],
         });
-        broker.ActiveClientId = "evil#1";
+        broker.DefaultClientId = "evil#1";
 
         var options = new HubOptions { ServeMcpOverPipe = false, HttpPort = 0 };
         var hub = HubMcpServer.Start(broker, options);

@@ -80,7 +80,10 @@ public static class Program
         {
             updater = HubUpdater.CreateGithub(
                 broker, hubOptions.UpdateRepoUrl, hubOptions.UpdateCheckInterval,
-                msg => Console.Error.WriteLine($"[keincheck-hub:update] {msg}"));
+                msg => Console.Error.WriteLine($"[keincheck-hub:update] {msg}"),
+                agentSessionCount: () => HubRuntime.Mcp?.ConnectedSessionCount ?? 0);
+            if (updater is not null && HubRuntime.Mcp is { } mcp)
+                mcp.SessionsChanged += updater.PokeIdle;
             updater?.Start();
         }
 
