@@ -23,11 +23,23 @@ public static class HubRuntime
     /// </summary>
     public static Remote.RemoteAccess? Remote { get; set; }
 
+    /// <summary>Who is currently allowed to drive each app instance, once started.</summary>
+    public static ClientClaimRegistry? Claims { get; private set; }
+
     /// <summary>Starts the MCP servers around <paramref name="broker"/>.</summary>
     public static void Start(IClientBroker broker, HubOptions options)
     {
         _broker = broker;
-        _mcp = HubMcpServer.Start(broker, options);
+
+        // One registry, shared by the MCP server (which enforces claims), the broker (which
+        // reads them to resolve "an instance nobody is driving") and the tray (which shows
+        // them and can force-release). Constructing it here keeps that single instance
+        // obvious rather than leaving each component to make its own.
+        var claims = new ClientClaimRegistry(
+            options.ClaimIdleTimeout, (broker as PipeClientBroker)?.Audit);
+        Claims = claims;
+
+        _mcp = HubMcpServer.Start(broker, options, claims);
 
         if (options.ServeMcpOverPipe)
         {

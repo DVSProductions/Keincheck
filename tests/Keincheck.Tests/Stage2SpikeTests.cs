@@ -146,7 +146,7 @@ public sealed class Stage2SpikeTests
                 },
             },
         });
-        broker.ActiveClientId = "app1";
+        broker.DefaultClientId = "app1";
 
         // Start the hub MCP server (Mechanic #2) but DON'T serve its HTTP endpoint here
         // (HttpPort 0 = ephemeral); we only use its dynamic handler wiring over a stream

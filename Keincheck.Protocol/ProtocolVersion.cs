@@ -19,6 +19,12 @@ public static class ProtocolVersion
     /// <see cref="ToolDescriptor.ReadOnly"/>. All of it is additive: a v1 client that
     /// registers on the pipe without ever sending a Hello behaves exactly as before, which
     /// is why <see cref="Minimum"/> stays at 1.
+    /// <para>
+    /// <see cref="RegisterMessage.LaunchToken"/> was added later, and deliberately needed no
+    /// bump: it is one optional field on a message both sides already exchange. A client that
+    /// predates it simply never sends it, and the hub falls back to matching a launch on
+    /// process id — which is what it did before the field existed.
+    /// </para>
     /// </remarks>
     public const int Current = 2;
 

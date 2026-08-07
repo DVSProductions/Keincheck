@@ -155,7 +155,7 @@ public sealed class RemoteEndToEndTests : IDisposable
         // Read-only by default, and NOT active until someone chooses it.
         Assert.True(info.ReadOnly);
         Assert.False(info.CanLaunch);
-        Assert.Null(rig.Broker.ActiveClientId);
+        Assert.Null(rig.Broker.DefaultClientId);
 
         // Looking works...
         var result = await rig.Broker.InvokeOnClientAsync(info.ClientId, "get_logical_tree", null);

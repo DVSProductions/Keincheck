@@ -209,6 +209,25 @@ public sealed class RegisterMessage
     /// </summary>
     [JsonPropertyName("clientVersion")]
     public string? ClientVersion { get; set; }
+
+    /// <summary>
+    /// Echo of the <c>KEINCHECK_LAUNCH_TOKEN</c> environment variable, when the hub started
+    /// this process on an agent's behalf. Lets the hub match the registration back to the
+    /// launch that asked for it, and hand the instance to that agent alone.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Process id alone is not enough. An app is routinely started through a launcher — a
+    /// shell script, a <c>dotnet</c> host, a shim — so the process the hub started is often
+    /// not the process that registers, and pid matching silently fails exactly there.
+    /// </para>
+    /// <para>
+    /// Optional and additive, so it needs no protocol-version bump: a client that predates
+    /// the field simply never sends it, and the hub falls back to matching on process id.
+    /// </para>
+    /// </remarks>
+    [JsonPropertyName("launchToken")]
+    public string? LaunchToken { get; set; }
 }
 
 /// <summary>

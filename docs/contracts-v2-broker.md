@@ -277,16 +277,25 @@ public interface IClientBroker
     IReadOnlyList<ClientInfo> ListClients();        // live pipe sessions
     IReadOnlyList<ClientInfo> ListKnownClients();   // live + previously-seen/persisted
     ClientInfo? ClientStatus(string clientId);
-    string?     ActiveClientId { get; set; }        // set => raises ClientUpdated => list_changed
 
-    Task<int> LaunchClientAsync(string clientId, CancellationToken ct = default);
-    Task<int> RestartClientAsync(string clientId, CancellationToken ct = default);
+    // The hub-wide DEFAULT selection: the seed a new agent session starts from, and the
+    // tray's notion of "the" client. NOT where tool calls are routed -- each MCP session
+    // carries its own selection (HubSession.ActiveClientId), because several agents share
+    // one hub and a single slot let one agent retarget every other agent's next call.
+    string?     DefaultClientId { get; set; }        // set => raises ClientUpdated => list_changed
+
+    Task<LaunchResult> LaunchClientAsync(string clientId, LaunchOptions? launch = null,
+        CancellationToken ct = default);
+    Task<LaunchResult> RestartClientAsync(string clientId, LaunchOptions? launch = null,
+        CancellationToken ct = default);
     Task<ToolResultMessage> InvokeOnClientAsync(string clientId, string toolName,
-        System.Text.Json.JsonElement? argumentsJson, CancellationToken ct = default);
+        System.Text.Json.JsonElement? argumentsJson, CancellationToken ct = default,
+        string? agent = null);                       // agent label, for the audit trail
 
     event EventHandler<ClientInfo>? ClientConnected;
     event EventHandler<ClientInfo>? ClientUpdated;  // metadata/catalog change
     event EventHandler<ClientInfo>? ClientDown;
+    event EventHandler<ClientInfo>? LaunchRegistered; // a hub-launched instance came up
 }
 
 public sealed record ClientInfo

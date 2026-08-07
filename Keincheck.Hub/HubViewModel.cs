@@ -36,6 +36,21 @@ public sealed class ClientRow : INotifyPropertyChanged
         set { if (_isActive != value) { _isActive = value; Raise(nameof(IsActive)); Raise(nameof(StatusLine)); } }
     }
 
+    /// <summary>
+    /// The agent currently allowed to drive this instance, or null when it is free. Shown so
+    /// the operator can see which of several agents owns which copy of an app.
+    /// </summary>
+    public string? ClaimedBy
+    {
+        get => _claimedBy;
+        set { if (_claimedBy != value) { _claimedBy = value; Raise(nameof(ClaimedBy)); Raise(nameof(IsClaimed)); Raise(nameof(StatusLine)); } }
+    }
+
+    /// <summary>True when some agent holds this instance (drives the release affordance).</summary>
+    public bool IsClaimed => _claimedBy is { Length: > 0 };
+
+    private string? _claimedBy;
+
     public string ClientId => _info.ClientId;
 
     /// <summary>
@@ -72,7 +87,8 @@ public sealed class ClientRow : INotifyPropertyChanged
             // Say "remote" outright. The operator needs to know at a glance that a line in
             // this list represents a machine that is not in front of them.
             var where = _info.IsRemote ? " · REMOTE" : string.Empty;
-            return $"{state}{where}{pid} · {_info.Tools.Count} tools{ro}{active}";
+            var driver = _claimedBy is { Length: > 0 } who ? $" · driven by {who}" : string.Empty;
+            return $"{state}{where}{pid} · {_info.Tools.Count} tools{ro}{active}{driver}";
         }
     }
 
@@ -82,6 +98,7 @@ public sealed class ClientRow : INotifyPropertyChanged
         {
             nameof(Display), nameof(IsConnected), nameof(ReadOnly), nameof(ToolCount),
             nameof(StatusLine), nameof(IsRemote), nameof(CanLaunch),
+            nameof(ClaimedBy), nameof(IsClaimed),
         })
             Raise(p);
     }
@@ -99,14 +116,16 @@ public sealed class ClientRow : INotifyPropertyChanged
 public sealed class HubViewModel : INotifyPropertyChanged, IDisposable
 {
     private readonly PipeClientBroker _broker;
+    private readonly HubMcpServer? _mcp;
     private string? _drivingText;
 
-    public HubViewModel(PipeClientBroker broker)
+    public HubViewModel(PipeClientBroker broker, HubMcpServer? mcp = null)
     {
         _broker = broker;
+        _mcp = mcp;
 
         foreach (var c in _broker.ListKnownClients())
-            Clients.Add(new ClientRow(c, c.ClientId == _broker.ActiveClientId));
+            Clients.Add(new ClientRow(c, c.ClientId == _broker.DefaultClientId));
         foreach (var e in _broker.Audit.Snapshot())
             Audit.Add(e.Summary);
 
@@ -115,7 +134,14 @@ public sealed class HubViewModel : INotifyPropertyChanged, IDisposable
         _broker.ClientDown += OnClientChanged;
         _broker.Audit.EntryAdded += OnAudit;
 
+        if (_mcp is not null)
+        {
+            _mcp.SessionsChanged += OnSessionsChanged;
+            _mcp.Claims.Changed += OnSessionsChanged;
+        }
+
         UpdateDriving();
+        UpdateClaims();
     }
 
     /// <summary>The live client rows shown in the window.</summary>
@@ -124,23 +150,42 @@ public sealed class HubViewModel : INotifyPropertyChanged, IDisposable
     /// <summary>Recent AI tool-call lines.</summary>
     public ObservableCollection<string> Audit { get; } = new();
 
-    /// <summary>The "AI is driving X" banner text (empty when idle / no active client).</summary>
+    /// <summary>
+    /// The "AI is driving X" banner. With several agents connected it lists one line each, so
+    /// the operator can see who is driving what rather than a single misleading answer.
+    /// </summary>
     public string DrivingText
     {
-        get => _drivingText ?? "No active client — the AI sees only the hub meta-tools.";
+        get => _drivingText ?? "No AI agent connected.";
         private set { _drivingText = value; Raise(nameof(DrivingText)); }
     }
 
-    /// <summary>Makes <paramref name="clientId"/> the active (AI-driven) client.</summary>
+    /// <summary>
+    /// Points every connected agent at <paramref name="clientId"/>. A deliberate operator
+    /// override: the human at the machine outranks what the agents chose for themselves.
+    /// </summary>
     public void SelectActive(string clientId)
     {
-        _broker.ActiveClientId = clientId;
+        _broker.DefaultClientId = clientId;
+        _mcp?.SelectForAllSessions(clientId);
         OnUi(() =>
         {
             foreach (var row in Clients)
                 row.IsActive = row.ClientId == clientId;
             UpdateDriving();
         });
+    }
+
+    /// <summary>
+    /// Frees an app an agent is holding, so somebody else can drive it. The unblock hatch for
+    /// an agent that died without releasing and is not yet past the idle timeout.
+    /// </summary>
+    public void ReleaseClaim(string clientId)
+    {
+        if (_mcp is null)
+            return;
+        _mcp.Claims.Release(clientId, sessionId: null, force: true);
+        UpdateClaims();
     }
 
     /// <summary>Launches a known/offline app from its recorded profile.</summary>
@@ -166,13 +211,14 @@ public sealed class HubViewModel : INotifyPropertyChanged, IDisposable
     {
         var existing = Clients.FirstOrDefault(c => c.ClientId == info.ClientId);
         if (existing is null)
-            Clients.Add(new ClientRow(info, info.ClientId == _broker.ActiveClientId));
+            Clients.Add(new ClientRow(info, info.ClientId == _broker.DefaultClientId));
         else
             existing.Info = info;
 
         foreach (var row in Clients)
-            row.IsActive = row.ClientId == _broker.ActiveClientId;
+            row.IsActive = row.ClientId == _broker.DefaultClientId;
         UpdateDriving();
+        UpdateClaims();
     });
 
     private void OnAudit(object? sender, AuditEntry entry) => OnUi(() =>
@@ -182,20 +228,55 @@ public sealed class HubViewModel : INotifyPropertyChanged, IDisposable
             Audit.RemoveAt(0);
     });
 
+    private void OnSessionsChanged() => OnUi(() =>
+    {
+        UpdateDriving();
+        UpdateClaims();
+    });
+
+    /// <summary>Mirrors the claim registry onto the rows so each shows who is driving it.</summary>
+    private void UpdateClaims()
+    {
+        if (_mcp is null)
+            return;
+
+        var byClient = _mcp.Claims.Snapshot().ToDictionary(c => c.ClientId, c => c.SessionLabel, StringComparer.Ordinal);
+        foreach (var row in Clients)
+            row.ClaimedBy = byClient.GetValueOrDefault(row.ClientId);
+    }
+
     private void UpdateDriving()
     {
-        var activeId = _broker.ActiveClientId;
-        if (activeId is null)
+        // No MCP server wired in (the designer/previewer path): fall back to the hub-wide
+        // default, which is all that host knows about.
+        var sessions = _mcp?.SessionSnapshots();
+        if (sessions is null)
         {
-            DrivingText = "No active client — the AI sees only the hub meta-tools.";
+            var fallbackId = _broker.DefaultClientId;
+            DrivingText = fallbackId is null
+                ? "No active client — the AI sees only the hub meta-tools."
+                : $"AI target: {Clients.FirstOrDefault(c => c.ClientId == fallbackId)?.Display ?? fallbackId}";
             return;
         }
 
-        var row = Clients.FirstOrDefault(c => c.ClientId == activeId);
-        var name = row?.Display ?? activeId;
-        DrivingText = row is { IsConnected: true }
-            ? $"AI is driving: {name}"
-            : $"AI target: {name} (offline)";
+        if (sessions.Count == 0)
+        {
+            DrivingText = "No AI agent connected.";
+            return;
+        }
+
+        var lines = sessions
+            .OrderBy(s => s.ConnectedUtc)
+            .Select(s =>
+            {
+                var label = s.Label.Length > 0 ? s.Label : "connecting…";
+                if (s.ActiveClientId is not { } id)
+                    return $"{label} → (no client selected)";
+                var name = Clients.FirstOrDefault(c => c.ClientId == id)?.Display ?? id;
+                return $"{label} → {name}";
+            });
+
+        DrivingText = string.Join(Environment.NewLine, lines);
     }
 
     private void Note(string line) => OnUi(() =>
@@ -222,5 +303,11 @@ public sealed class HubViewModel : INotifyPropertyChanged, IDisposable
         _broker.ClientUpdated -= OnClientChanged;
         _broker.ClientDown -= OnClientChanged;
         _broker.Audit.EntryAdded -= OnAudit;
+
+        if (_mcp is not null)
+        {
+            _mcp.SessionsChanged -= OnSessionsChanged;
+            _mcp.Claims.Changed -= OnSessionsChanged;
+        }
     }
 }

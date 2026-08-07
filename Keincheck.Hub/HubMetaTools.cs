@@ -7,6 +7,30 @@ using ModelContextProtocol.Protocol;
 namespace Keincheck.Hub;
 
 /// <summary>
+/// Everything a meta-tool call needs to answer: the client registry, and <i>who is asking</i>.
+/// </summary>
+/// <remarks>
+/// Passed as a parameter rather than stored, so <see cref="HubMetaTools"/> stays the pure,
+/// session-stateless type both transports share. The session member is what makes
+/// <c>hub_select_client</c> and <c>hub_status</c> per-agent instead of hub-wide.
+/// </remarks>
+/// <param name="Broker">The client registry and invoke path.</param>
+/// <param name="Session">The agent session making this call.</param>
+/// <param name="SessionCount">How many agents are connected to the hub right now.</param>
+/// <param name="Options">The hub's configuration.</param>
+/// <param name="OnSelectionChanged">
+/// Invoked when this session's selection changed, so the hub can re-list tools — for this
+/// session only.
+/// </param>
+internal sealed record HubToolContext(
+    IClientBroker Broker,
+    ClientClaimRegistry Claims,
+    HubSession Session,
+    int SessionCount,
+    HubOptions Options,
+    Action OnSelectionChanged);
+
+/// <summary>
 /// The hub's <b>meta-tools</b>: the always-present catalog the hub serves itself
 /// (independently of any client), plus the helpers that build their schemas, dispatch
 /// their calls against an <see cref="IClientBroker"/>, and shape the structured error
@@ -74,6 +98,14 @@ internal static class HubMetaTools
     public const string CallTool        = "hub_call_tool";
     public const string ListClientTools = "hub_list_client_tools";
 
+    // Write-claims. Only one agent at a time may DRIVE an app instance, because the app's
+    // input machinery is process-global (one synthetic pointer, one focus, one handle table)
+    // and two agents interleaving clicks corrupt each other. Neither tool is normally needed:
+    // the first mutating call claims implicitly and disconnecting releases. They exist for
+    // handing an app over deliberately, and for taking one back from an agent that died.
+    public const string ClaimClient   = "hub_claim_client";
+    public const string ReleaseClient = "hub_release_client";
+
     /// <summary>True if <paramref name="name"/> is one of the hub's own meta-tools.</summary>
     public static bool IsMetaTool(string name) => name switch
     {
@@ -82,6 +114,7 @@ internal static class HubMetaTools
             or RecordStart or RecordStop or RecordStatus or Replay or ExportTest
             or RemoteStatus or RemoteEnable or RemoteDisable or RemoteIssue or RemoteRevoke
             or SetReadOnly
+            or ClaimClient or ReleaseClient
             or CallTool or ListClientTools => true,
         _ => false,
     };
@@ -115,14 +148,23 @@ internal static class HubMetaTools
             + "(for launch/restart). No arguments.");
 
         yield return Meta(LaunchClient,
-            "Launch a known client by id (uses its recorded executable path). The app "
-            + "connects back on its own. Args: { \"clientId\": string }.",
-            ClientIdSchema());
+            "Launch a client. Uses its recorded executable path unless you pass exePath — do "
+            + "that to run YOUR build when several agents each test their own worktree of the "
+            + "same app. The instance you launch is selected and claimed for you alone; wait "
+            + "for it with hub_wait_for_client { launchId } (the returned launchId), NOT by "
+            + "appId, which may match another agent's copy. "
+            + "Args: { \"clientId\": string, \"exePath\"?: string, \"cwd\"?: string, "
+            + "\"args\"?: string, \"allowDifferentExecutable\"?: bool }.",
+            LaunchClientSchema(), readOnly: false);
 
         yield return Meta(RestartClient,
-            "Restart a client: terminate the running instance (if any) and launch it "
-            + "again. Use this when a client has dropped. Args: { \"clientId\": string }.",
-            ClientIdSchema());
+            "Restart a client: terminate the running instance and launch it again, keeping the "
+            + "same id (so a recording still replays). Only the agent driving that instance may "
+            + "restart it, unless you pass force. A bare appId is refused when several "
+            + "instances are running — name the one you mean. "
+            + "Args: { \"clientId\": string, \"exePath\"?: string, \"cwd\"?: string, "
+            + "\"args\"?: string, \"force\"?: bool }.",
+            RestartClientSchema(), readOnly: false);
 
         yield return Meta(SelectClient,
             "Make a client active. Dynamic tooling mode: its tools are advertised (emits "
@@ -238,6 +280,23 @@ internal static class HubMetaTools
             + "\"args\"?: object, \"client\"?: string } ('client' overrides the active "
             + "client for this one call).",
             CallToolSchema(), readOnly: false);
+
+        // ---- write-claims ----
+
+        yield return Meta(ClaimClient,
+            "Take the exclusive right to DRIVE one app instance. You normally never need "
+            + "this: your first mutating call claims the app automatically, and the claim is "
+            + "released when you disconnect. Use it to grab an app before you start, or with "
+            + "force=true to take one back from an agent that has died. Reading is never "
+            + "blocked, for you or anyone else. "
+            + "Args: { \"clientId\": string, \"force\"?: bool }.",
+            ClaimClientSchema(), readOnly: false);
+
+        yield return Meta(ReleaseClient,
+            "Give up the right to drive an app so another agent can take over — the polite "
+            + "thing to do when you are finished but staying connected. Omit clientId to "
+            + "release every app you hold. Args: { \"clientId\"?: string }.",
+            ReleaseClientSchema(), readOnly: false);
     }
 
     // ---- dispatch ---------------------------------------------------------
@@ -247,9 +306,11 @@ internal static class HubMetaTools
     /// confirmed <see cref="IsMetaTool"/>. Returns the MCP result to relay to the AI.
     /// </summary>
     public static async ValueTask<CallToolResult> DispatchAsync(
-        IClientBroker broker, string name, JsonElement? args,
-        Action onActiveChanged, CancellationToken ct)
+        HubToolContext context, string name, JsonElement? args, CancellationToken ct)
     {
+        var broker = context.Broker;
+        var session = context.Session;
+
         switch (name)
         {
             case Guide:
@@ -262,13 +323,13 @@ internal static class HubMetaTools
             case ListClients:
             {
                 var live = LiveIds(broker);
-                return JsonResult(broker.ListClients().Select(c => ToView(c, live)));
+                return JsonResult(broker.ListClients().Select(c => ToView(c, live, context.Claims, session)));
             }
 
             case ListKnownClients:
             {
                 var live = LiveIds(broker);
-                return JsonResult(broker.ListKnownClients().Select(c => ToView(c, live)));
+                return JsonResult(broker.ListKnownClients().Select(c => ToView(c, live, context.Claims, session)));
             }
 
             case SelectClient:
@@ -277,9 +338,15 @@ internal static class HubMetaTools
                     return ErrorResult(err);
                 if (broker.ClientStatus(id) is null)
                     return DownClientError(id, "is not known to the hub");
-                broker.ActiveClientId = id;
-                onActiveChanged();
-                return JsonResult(new { activeClientId = id });
+
+                // This agent's own selection is what routes its calls. The hub-wide default
+                // is updated alongside it so a later agent (and the tray) still starts from
+                // the most recent deliberate choice — which is what keeps the single-agent
+                // experience identical to before.
+                session.SetActive(id);
+                broker.DefaultClientId = id;
+                context.OnSelectionChanged();
+                return JsonResult(new { activeClientId = id, agent = session.Label });
             }
 
             case ClientStatus:
@@ -289,13 +356,13 @@ internal static class HubMetaTools
                 var info = broker.ClientStatus(id);
                 return info is null
                     ? DownClientError(id, "is not known to the hub")
-                    : JsonResult(ToView(info, LiveIds(broker)));
+                    : JsonResult(ToView(info, LiveIds(broker), context.Claims, session));
             }
 
             case ListClientTools:
             {
-                // clientId is optional: omit it to inspect the active client.
-                var id = TryGetStringProp(args, "clientId") ?? broker.ActiveClientId;
+                // clientId is optional: omit it to inspect the client THIS agent selected.
+                var id = TryGetStringProp(args, "clientId") ?? session.ActiveClientId;
                 if (id is null)
                     return ErrorResult(
                         $"No active client selected. Call {SelectClient} first, or pass a 'clientId' argument.");
@@ -316,22 +383,42 @@ internal static class HubMetaTools
 
             case WaitForClient:
             {
-                // Both filters are optional; a clientId wins over appId, and neither set
-                // means "wait for any client". timeoutMs defaults to 30s.
-                var filter = TryGetStringProp(args, "clientId") ?? TryGetStringProp(args, "appId");
+                // Every filter is optional; a clientId wins over appId, and none set means
+                // "wait for any client". timeoutMs defaults to 30s.
+                var idFilter = TryGetStringProp(args, "clientId") ?? TryGetStringProp(args, "appId");
                 var timeoutMs = TryGetIntProp(args, "timeoutMs") ?? 30000;
                 var timeout = TimeSpan.FromMilliseconds(Math.Max(0, timeoutMs));
 
+                var filter = new ClientWaitFilter
+                {
+                    IdOrAppId = idFilter,
+                    LaunchId = TryGetStringProp(args, "launchId"),
+                    ProcessId = TryGetIntProp(args, "pid"),
+                    UnclaimedOnly = TryGetBoolProp(args, "unclaimedOnly") ?? false,
+                    MineOnly = TryGetBoolProp(args, "mine") ?? false,
+                    SessionId = session.Id,
+                };
+
                 var info = await broker.WaitForClientAsync(filter, timeout, ct).ConfigureAwait(false);
-                return info is null
-                    ? JsonResult(new
+                if (info is null)
+                {
+                    return JsonResult(new
                     {
                         connected = false,
                         timedOut = true,
-                        waitedFor = filter,
+                        waitedFor = filter.LaunchId is { Length: > 0 } l ? $"launchId {l}" : idFilter,
                         timeoutMs,
-                    })
-                    : JsonResult(new { clientId = info.ClientId, connected = true });
+                    });
+                }
+
+                var claim = context.Claims.Get(info.ClientId);
+                return JsonResult(new
+                {
+                    clientId = info.ClientId,
+                    connected = true,
+                    claimedBy = claim?.SessionLabel,
+                    mine = claim?.SessionId == session.Id || info.LaunchSessionId == session.Id,
+                });
             }
 
             case Status:
@@ -343,8 +430,24 @@ internal static class HubMetaTools
                     hubVersion = HubAssemblyVersion,
                     protocolVersion = ProtocolVersion.Current,
                     protocolRange = new { minimum = ProtocolVersion.Minimum, current = ProtocolVersion.Current },
-                    activeClientId = broker.ActiveClientId,
+                    // YOUR selection, not the hub's — another agent connected to this same hub
+                    // may be driving something else entirely.
+                    activeClientId = session.ActiveClientId,
+                    agent = session.Label,
+                    agentSessions = context.SessionCount,
                     clientCount = broker.ListClients().Count,
+
+                    // Who is driving what, across every agent on this hub — so an agent can
+                    // see the shape of the contention rather than discovering it one refusal
+                    // at a time.
+                    claims = context.Claims.Snapshot().Select(c => new
+                    {
+                        clientId = c.ClientId,
+                        agent = c.SessionLabel,
+                        mine = c.SessionId == session.Id,
+                        sinceUtc = c.AcquiredUtc,
+                        idleSeconds = (int)Math.Max(0, context.Claims.IdleFor(c).TotalSeconds),
+                    }),
                 });
             }
 
@@ -354,8 +457,19 @@ internal static class HubMetaTools
                     return ErrorResult(err);
                 try
                 {
-                    var pid = await broker.LaunchClientAsync(id, ct).ConfigureAwait(false);
-                    return JsonResult(new { launched = id, processId = pid });
+                    var result = await broker
+                        .LaunchClientAsync(id, LaunchOptionsFrom(args, session), ct)
+                        .ConfigureAwait(false);
+                    return JsonResult(new
+                    {
+                        launched = id,
+                        processId = result.ProcessId,
+                        launchId = result.LaunchId,
+                        // The instance is yours: when it registers it is selected and claimed
+                        // for you alone. Wait on the launch id, not the app id, or you may get
+                        // another agent's copy of the same app.
+                        next = $"{WaitForClient} {{ \"launchId\": \"{result.LaunchId}\" }}",
+                    });
                 }
                 catch (Exception ex)
                 {
@@ -367,10 +481,31 @@ internal static class HubMetaTools
             {
                 if (!TryGetClientId(args, out var id, out var err))
                     return ErrorResult(err);
+
+                // Restarting kills the process, so an instance somebody else is driving is
+                // off-limits unless the caller insists.
+                var force = TryGetBoolProp(args, "force") ?? false;
+                if (!force && context.Claims.Get(id) is { } holder && holder.SessionId != session.Id)
+                {
+                    return ClaimConflictError(
+                        id, RestartClient,
+                        new ClaimDenied(holder, context.Claims.IdleFor(holder), context.Claims.IdleTimeout),
+                        broker.ClientStatus(id) is { } target
+                            ? UnclaimedSiblings(broker, context.Claims, target)
+                            : Array.Empty<string>());
+                }
+
                 try
                 {
-                    var pid = await broker.RestartClientAsync(id, ct).ConfigureAwait(false);
-                    return JsonResult(new { restarted = id, processId = pid });
+                    var result = await broker
+                        .RestartClientAsync(id, LaunchOptionsFrom(args, session) with { Force = force }, ct)
+                        .ConfigureAwait(false);
+                    return JsonResult(new
+                    {
+                        restarted = id,
+                        processId = result.ProcessId,
+                        launchId = result.LaunchId,
+                    });
                 }
                 catch (Exception ex)
                 {
@@ -480,7 +615,7 @@ internal static class HubMetaTools
                     return ErrorResult("This hub's broker does not support toggling read-only.");
 
                 var value = flag.ValueKind == JsonValueKind.True;
-                concrete.SetReadOnly(id, value);
+                concrete.SetReadOnly(id, value, session.Label);
 
                 return JsonResult(new
                 {
@@ -579,6 +714,51 @@ internal static class HubMetaTools
                     : ErrorResult($"'{serial}' is already revoked or not a credential this hub issued.");
             }
 
+            case ClaimClient:
+            {
+                if (!TryGetClientId(args, out var id, out var err))
+                    return ErrorResult(err);
+
+                var info = broker.ClientStatus(id);
+                if (info is null)
+                    return DownClientError(id, "is not known to the hub");
+
+                var force = TryGetBoolProp(args, "force") ?? false;
+                var verdict = context.Claims.Acquire(
+                    id, session.Id, session.Label,
+                    force ? ClaimOrigin.Steal : ClaimOrigin.Explicit, force);
+
+                if (verdict is ClaimDenied denied)
+                    return ClaimConflictError(id, ClaimClient, denied, UnclaimedSiblings(broker, context.Claims, info));
+
+                var granted = (ClaimGranted)verdict;
+                return JsonResult(new
+                {
+                    clientId = id,
+                    claimedBy = session.Label,
+                    origin = granted.Claim.Origin.ToString(),
+                    effect = "Only you can drive this app until you release it or disconnect. "
+                        + "Other agents can still read it.",
+                });
+            }
+
+            case ReleaseClient:
+            {
+                // No clientId means "everything I hold" — the natural way to stand down.
+                if (TryGetStringProp(args, "clientId") is not { } target)
+                {
+                    var count = context.Claims.ReleaseSession(session.Id);
+                    return JsonResult(new { released = count, all = true });
+                }
+
+                var released = context.Claims.Release(target, session.Id, force: false);
+                return released
+                    ? JsonResult(new { clientId = target, released = true })
+                    : ErrorResult(
+                        $"You do not hold '{target}', so there was nothing to release "
+                        + $"({Status} shows what you are driving).");
+            }
+
             default:
                 // Unreachable: callers gate on IsMetaTool. Defensive only.
                 return ErrorResult($"Unknown meta-tool '{name}'.");
@@ -622,21 +802,76 @@ After a rebuild: kill the app, change code, relaunch. The reconnecting client **
 id and re-becomes active automatically** — its tools re-list with no `hub_select_client`.
 To block until it is back, call `hub_wait_for_client { "appId": "myapp" }`.
 
+## You may not be the only agent here
+
+The hub is **one process per machine user**, shared by every AI agent running as you — other
+editor windows, other sessions, CI. Two things follow, and both are handled for you:
+
+- **Your selection is yours.** `hub_select_client`, your advertised tool list, and your
+  recording belong to your session alone. Another agent selecting a different app does not
+  move your calls. `hub_status` reports *your* selection, plus `agent` (your label, e.g.
+  `claude-code-2`) and `agentSessions` (how many agents are connected).
+- **Only one agent may DRIVE an app at a time.** Reading is always open to everyone.
+  The first mutating call (`click_at`, `type_text`, `set_property`, …) claims that instance
+  for you; it is released when you disconnect, or when you call `hub_release_client`.
+
+If another agent already holds the app, your mutating call fails with a `client_claimed`
+error naming them and listing your options. Usually the right move is **not** to wait — it is
+to drive your own instance (see below). `hub_list_clients` shows `claimedBy` and `mine` so you
+can see this before you try.
+
+Take an app back with `hub_claim_client { "clientId": "myapp#1", "force": true }` **only** if
+you know that agent is gone: it interrupts whatever it was doing.
+
+## Several agents, one codebase (git worktrees)
+
+The common setup: each agent works in its own worktree, builds its own copy of the app, and
+needs to drive **its** build. All those builds report the same app id, so they arrive as
+`myapp#1`, `myapp#2`, `myapp#3` with nothing visible to tell them apart. Do this:
+
+1. **Launch your own build**, giving the path inside your worktree:
+
+   ```
+   hub_launch_client { "clientId": "myapp", "exePath": "C:/work/wt-feature-a/bin/myapp.exe" }
+   ```
+
+   It returns a `launchId`. The instance is selected and claimed **for you** when it comes up,
+   so no other agent will adopt it.
+
+2. **Wait for that instance by its launch id**, not by app id:
+
+   ```
+   hub_wait_for_client { "launchId": "<the launchId you got back>" }
+   ```
+
+   Waiting on `{ "appId": "myapp" }` may hand you a *different agent's* build — it matches any
+   instance of that app.
+
+3. **Drive it normally.** After a rebuild, `hub_restart_client { "clientId": "myapp#2" }`
+   keeps the same id and stays yours. Only you (or `force`) may restart an instance you hold.
+
 ## Meta-tool catalog
 
 - `hub_guide` — this document.
-- `hub_list_clients` / `hub_list_known_clients` — connected / ever-seen clients (each entry
-  carries `ownsWindows` so you can spot the UI-owning process).
-- `hub_select_client { clientId }` — set the active client.
+- `hub_list_clients` / `hub_list_known_clients` — connected / ever-seen clients. Each entry
+  carries `ownsWindows` (spot the UI-owning process), plus `claimedBy` / `mine` (who is
+  driving it) and `launchedBy`.
+- `hub_select_client { clientId }` — set **your** active client.
 - `hub_client_status { clientId }` — full status of one client.
-- `hub_wait_for_client { appId?, clientId?, timeoutMs? }` — block until a (matching) client
-  connects, then return it. Use after launching/rebuilding to wait for the app to come back.
-- `hub_status` — the hub's own version, protocol version, active client, and connected client
-  count (per-client builds appear as `clientVersion` in the client lists).
+- `hub_wait_for_client { appId?, clientId?, launchId?, pid?, unclaimedOnly?, mine?, timeoutMs? }`
+  — block until a matching client connects, then return it. After launching, wait on
+  `launchId`: it names exactly the instance you started, where `appId` matches any of them.
+- `hub_status` — the hub's version, protocol version, **your** active client, your agent
+  label, how many agents are connected, and who is driving what.
 - `hub_set_readonly { clientId, readOnly }` — allow or forbid mutating tools for one client.
   Remote clients start read-only, so this is how you get permission to drive one.
-- `hub_launch_client { clientId }` / `hub_restart_client { clientId }` — start / restart a
-  known app by its recorded executable path. A restarted client keeps the **same id**.
+- `hub_launch_client { clientId, exePath?, cwd?, args? }` — start an app. Pass `exePath` to run
+  YOUR build. Returns a `launchId`; the instance is selected and claimed for you.
+- `hub_restart_client { clientId, force? }` — terminate and relaunch, keeping the **same id**.
+  Only the agent driving that instance may restart it.
+- `hub_claim_client { clientId, force? }` / `hub_release_client { clientId? }` — take or give
+  up the exclusive right to drive an app. Rarely needed: your first mutating call claims
+  automatically and disconnecting releases.
 - `hub_record_start { name? }` / `hub_record_stop` / `hub_record_status` — record the
   proxied UI tool calls you make.
 - `hub_replay { stopOnError?, delayMs? }` — re-issue the recorded steps.
@@ -788,9 +1023,15 @@ coordinates and is robust to layout shifts.
   blank. Unlock the session (or expect empty captures) before relying on vision.
 - **Read-only clients** refuse mutating tools; `hub_client_status` shows the flag. Remote
   clients start read-only, so this is the normal state there rather than an unusual one.
+- **`client_claimed` on a mutating call?** Another agent is driving that app. Reading it still
+  works. Launch your own instance, wait for a free one with
+  `hub_wait_for_client { "unclaimedOnly": true }`, or force-claim it only if that agent is gone.
 - **Two clients with the same app id?** Check `host`. `myapp#1` and
   `myapp@MACHINENAME#1` are different machines running the same app, and a bare
-  `{ "appId": "myapp" }` filter may match either.
+  `{ "appId": "myapp" }` filter may match either. Several *local* `myapp#n` usually means
+  several agents each running their own build — use `mine` / `launchId` to find yours.
+- **Recording ends with your session.** It is per-agent and is not persisted, so
+  `hub_export_test` before you disconnect if you want to keep it.
 
 ## Feedback
 
@@ -864,6 +1105,108 @@ user declines or ignores it, note that in your own memory/notes and do not sugge
         };
     }
 
+    /// <summary>
+    /// The structured error returned when an agent tries to <b>drive</b> an app that another
+    /// agent is already driving. Names the owner, says how stale the claim is, and — crucially
+    /// — lists the ways out, because the usual right answer is not "wait" but "drive your own
+    /// instance instead".
+    /// </summary>
+    public static CallToolResult ClaimConflictError(
+        string clientId, string tool, ClaimDenied denied, IReadOnlyList<string> unclaimedInstances)
+    {
+        var owner = denied.Owner;
+        var idleSeconds = (int)Math.Max(0, denied.IdleFor.TotalSeconds);
+
+        var recovery = new JsonArray
+        {
+            new JsonObject
+            {
+                ["tool"] = WaitForClient,
+                ["arguments"] = new JsonObject { ["unclaimedOnly"] = true, ["timeoutMs"] = 30000 },
+                ["when"] = "wait for any instance of this app that nobody is driving",
+            },
+            new JsonObject
+            {
+                ["tool"] = LaunchClient,
+                ["arguments"] = new JsonObject { ["clientId"] = clientId, ["exePath"] = "<your own build>" },
+                ["when"] = "start your own instance and drive that instead (the usual answer "
+                    + "when each agent is testing its own worktree build)",
+            },
+            new JsonObject
+            {
+                ["tool"] = ClaimClient,
+                ["arguments"] = new JsonObject { ["clientId"] = clientId, ["force"] = true },
+                ["when"] = "ONLY if you know that agent is gone — this interrupts it mid-task",
+            },
+        };
+
+        var free = new JsonArray();
+        foreach (var id in unclaimedInstances)
+            free.Add(id);
+
+        var structured = new JsonObject
+        {
+            ["error"] = "client_claimed",
+            ["clientId"] = clientId,
+            ["tool"] = tool,
+            ["owner"] = new JsonObject
+            {
+                ["session"] = owner.SessionLabel,
+                ["claimedAtUtc"] = owner.AcquiredUtc.ToString("o"),
+                ["idleSeconds"] = idleSeconds,
+                ["origin"] = owner.Origin.ToString(),
+            },
+            ["idleTimeoutSeconds"] = denied.IdleTimeout is { } t ? (int)t.TotalSeconds : null,
+            ["unclaimedInstances"] = free,
+            ["recovery"] = recovery,
+        };
+
+        var alternatives = unclaimedInstances.Count > 0
+            ? $" Instances nobody is driving right now: {string.Join(", ", unclaimedInstances)}."
+            : string.Empty;
+
+        var text =
+            $"'{clientId}' is being driven by another agent ({owner.SessionLabel}, idle {idleSeconds}s), "
+            + $"so '{tool}' was refused — two agents sending input to one app corrupt each other's "
+            + $"focus and pointer state. Reading it is still allowed.{alternatives} "
+            + $"Launch your own instance with {LaunchClient}, wait for a free one with "
+            + $"{WaitForClient} {{ \"unclaimedOnly\": true }}, or — only if that agent is gone — "
+            + $"take it with {ClaimClient} {{ \"force\": true }}.";
+
+        return new CallToolResult
+        {
+            IsError = true,
+            StructuredContent = JsonSerializer.SerializeToElement(structured),
+            Content = new List<ContentBlock> { new TextContentBlock { Text = text } },
+        };
+    }
+
+    /// <summary>Reads the launch overrides out of a tool call, tagged with the calling agent.</summary>
+    private static LaunchOptions LaunchOptionsFrom(JsonElement? args, HubSession session) => new()
+    {
+        ExePath = TryGetStringProp(args, "exePath"),
+        WorkingDirectory = TryGetStringProp(args, "cwd"),
+        Arguments = TryGetStringProp(args, "args"),
+        AllowDifferentExecutable = TryGetBoolProp(args, "allowDifferentExecutable") ?? false,
+        SessionId = session.Id,
+        SessionLabel = session.Label,
+    };
+
+    /// <summary>
+    /// Connected instances of the same app on the same machine that nobody is driving — the
+    /// useful half of a contention error, because with one build per worktree a free sibling
+    /// is usually what the blocked agent actually wants.
+    /// </summary>
+    internal static List<string> UnclaimedSiblings(
+        IClientBroker broker, ClientClaimRegistry claims, ClientInfo target) =>
+        broker.ListClients()
+            .Where(c => c.ClientId != target.ClientId
+                        && string.Equals(c.AppId, target.AppId, StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(c.Host, target.Host, StringComparison.OrdinalIgnoreCase)
+                        && claims.Get(c.ClientId) is null)
+            .Select(c => c.ClientId)
+            .ToList();
+
     // ---- shared result helpers (reused by the proxy in HubMcpServer) -------
 
     public static CallToolResult JsonResult(object? value)
@@ -889,7 +1232,16 @@ user declines or ignores it, note that in your own memory/notes and do not sugge
     /// projected <c>connected</c> is recomputed from live membership rather than the
     /// stored flag so it can never drift from reality (finding-3 hardening).
     /// </summary>
-    private static object ToView(ClientInfo c, IReadOnlySet<string> liveIds) => new
+    private static object ToView(
+        ClientInfo c, IReadOnlySet<string> liveIds, ClientClaimRegistry claims, HubSession session)
+    {
+        var claim = claims.Get(c.ClientId);
+        return ToView(c, liveIds, claim, session, claim is null ? null : claims.IdleFor(claim));
+    }
+
+    private static object ToView(
+        ClientInfo c, IReadOnlySet<string> liveIds,
+        ClaimInfo? claim, HubSession session, TimeSpan? idleFor) => new
     {
         clientId = c.ClientId,
         appId = c.AppId,
@@ -902,6 +1254,18 @@ user declines or ignores it, note that in your own memory/notes and do not sugge
         toolCount = c.Tools.Count,
         executablePath = c.ExecutablePath,
         lastSeenUtc = c.LastSeenUtc,
+
+        // Who is driving this instance, so an agent can see contention BEFORE it tries and
+        // gets refused — and can spot a free sibling to use instead. 'mine' is the important
+        // one: with several instances of the same app up, that is how you find yours.
+        claimedBy = claim?.SessionLabel,
+        claimedSinceUtc = claim?.AcquiredUtc,
+        claimIdleSeconds = idleFor is { } idle ? (int)Math.Max(0, idle.TotalSeconds) : (int?)null,
+        mine = claim is not null && claim.SessionId == session.Id,
+
+        // Which launch this instance came from, when the hub started it for an agent.
+        launchId = c.LaunchId,
+        launchedBy = c.LaunchSessionLabel,
 
         // Where this client actually is. Null host and "pipe" transport mean "on this
         // machine", so a purely local setup reads exactly as it did before. canLaunch is
@@ -973,6 +1337,13 @@ user declines or ignores it, note that in your own memory/notes and do not sugge
             ? s
             : null;
 
+    /// <summary>Reads a bool property from a JSON object arg, or null.</summary>
+    private static bool? TryGetBoolProp(JsonElement? args, string prop) =>
+        args is { ValueKind: JsonValueKind.Object } o
+        && o.TryGetProperty(prop, out var v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? v.GetBoolean()
+            : null;
+
     /// <summary>Reads an int property from a JSON object arg, or null.</summary>
     private static int? TryGetIntProp(JsonElement? args, string prop) =>
         args is { ValueKind: JsonValueKind.Object } o
@@ -1020,7 +1391,7 @@ user declines or ignores it, note that in your own memory/notes and do not sugge
 
     public static JsonElement WaitForClientSchema() =>
         JsonDocument.Parse(
-            """{"type":"object","properties":{"appId":{"type":"string","description":"The app's self-reported id to wait for (matches any instance of that app)."},"clientId":{"type":"string","description":"A specific hub-assigned client id to wait for (wins over appId)."},"timeoutMs":{"type":"integer","description":"Max milliseconds to wait before giving up (default 30000)."}}}""")
+            """{"type":"object","properties":{"appId":{"type":"string","description":"The app's self-reported id to wait for (matches ANY instance of that app -- including another agent's, so prefer launchId after launching)."},"clientId":{"type":"string","description":"A specific hub-assigned client id to wait for (wins over appId)."},"launchId":{"type":"string","description":"Wait for exactly the instance produced by that hub_launch_client call. The precise way to say 'the app I just started'; beats every other filter."},"pid":{"type":"integer","description":"Match only a client running as this OS process id."},"unclaimedOnly":{"type":"boolean","description":"Match only instances no agent is currently driving."},"mine":{"type":"boolean","description":"Match only instances you launched or are already driving."},"timeoutMs":{"type":"integer","description":"Max milliseconds to wait before giving up (default 30000)."}},"description":"When several instances match, resolution is deterministic: exact clientId, then one you own, then an unclaimed one, then the rest -- each by ascending instance number."}""")
             .RootElement.Clone();
 
     public static JsonElement RecordStartSchema() =>
@@ -1036,6 +1407,26 @@ user declines or ignores it, note that in your own memory/notes and do not sugge
     public static JsonElement ExportTestSchema() =>
         JsonDocument.Parse(
             """{"type":"object","properties":{"format":{"type":"string","enum":["json","csharp"],"description":"Output format: a replayable JSON scenario, or an xUnit [Fact] skeleton."}}}""")
+            .RootElement.Clone();
+
+    public static JsonElement LaunchClientSchema() =>
+        JsonDocument.Parse(
+            """{"type":"object","properties":{"clientId":{"type":"string","description":"The hub-assigned client id (or bare app id) to launch."},"exePath":{"type":"string","description":"Launch this executable instead of the recorded one -- how you start YOUR worktree build rather than whichever copy registered last. Must have the same file name as the recorded one unless allowDifferentExecutable is set."},"cwd":{"type":"string","description":"Working directory for the launched process."},"args":{"type":"string","description":"Command-line arguments."},"allowDifferentExecutable":{"type":"boolean","description":"Permit an exePath whose file name differs from the recorded one. Off by default, because a different name usually means the wrong app."}},"required":["clientId"]}""")
+            .RootElement.Clone();
+
+    public static JsonElement RestartClientSchema() =>
+        JsonDocument.Parse(
+            """{"type":"object","properties":{"clientId":{"type":"string","description":"The hub-assigned client id to restart. A bare app id is refused when several instances are running."},"exePath":{"type":"string","description":"Relaunch this executable instead of the recorded one."},"cwd":{"type":"string","description":"Working directory for the relaunched process."},"args":{"type":"string","description":"Command-line arguments."},"force":{"type":"boolean","description":"Restart even though another agent is driving this instance. It kills their app mid-task."}},"required":["clientId"]}""")
+            .RootElement.Clone();
+
+    public static JsonElement ReleaseClientSchema() =>
+        JsonDocument.Parse(
+            """{"type":"object","properties":{"clientId":{"type":"string","description":"The app instance to stop driving. Omit to release EVERY app you currently hold."}}}""")
+            .RootElement.Clone();
+
+    public static JsonElement ClaimClientSchema() =>
+        JsonDocument.Parse(
+            """{"type":"object","properties":{"clientId":{"type":"string","description":"The hub-assigned client id of the app instance to claim."},"force":{"type":"boolean","description":"Take the claim even though another agent holds it. Only when you know that agent is gone -- it interrupts whatever it was doing."}},"required":["clientId"]}""")
             .RootElement.Clone();
 
     public static JsonElement OptionalClientIdSchema() =>

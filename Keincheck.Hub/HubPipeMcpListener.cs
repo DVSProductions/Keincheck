@@ -74,7 +74,14 @@ public sealed class HubPipeMcpListener : IAsyncDisposable
     /// </summary>
     public async Task RunMcpOverStreamAsync(Stream input, Stream output, CancellationToken ct)
     {
+        // One agent, one session object. Registering it in this session's own container is
+        // what lets a call handler find the caller: the SDK hands handlers a per-request
+        // server wrapper, but it passes through the service provider the server was built
+        // with — which is this one, and nobody else's.
+        var session = _hub.CreateSession();
+
         var services = new ServiceCollection();
+        services.AddSingleton(session);
         ConfigureSessionServices(services);
         await using var provider = services.BuildServiceProvider();
 
@@ -83,17 +90,17 @@ public sealed class HubPipeMcpListener : IAsyncDisposable
         await using var transport = new StreamServerTransport(input, output, _options.ServerName, loggerFactory: null);
         await using var server = McpServer.Create(transport, serverOptions, loggerFactory: null, serviceProvider: provider);
 
-        // Register this session's stable server for the lifetime of the session so it
-        // receives list-changed / log notifications, and remove it on disconnect. Do NOT
+        // Bind the session to its stable server for the lifetime of the session so it
+        // receives list-changed / log notifications, and drop it on disconnect. Do NOT
         // register request.Server per tools/list — that wrapper is per-request and leaks.
-        _hub.RegisterSession(server);
+        _hub.RegisterSession(server, session);
         try
         {
-            await server.RunAsync(ct).ConfigureAwait(false);
+            await _hub.RunSessionAsync(session, () => server.RunAsync(ct)).ConfigureAwait(false);
         }
         finally
         {
-            _hub.UnregisterSession(server);
+            _hub.EndSession(session);
         }
     }
 

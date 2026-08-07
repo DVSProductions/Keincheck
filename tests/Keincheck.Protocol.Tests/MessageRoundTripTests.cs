@@ -41,6 +41,55 @@ public class MessageRoundTripTests
     }
 
     [Fact]
+    public void RegisterMessage_LaunchToken_RoundTrips_And_Is_Omitted_When_Absent()
+    {
+        // The hub sets KEINCHECK_LAUNCH_TOKEN on a process it starts and matches the
+        // registration back to the launch by this echo, because the process the hub started
+        // is often not the one that registers (a launcher script, a dotnet host, a shim).
+        var withToken = new RegisterMessage
+        {
+            ClientId = "myapp",
+            ProcessId = 42,
+            ProtocolVersion = ProtocolVersion.Current,
+            LaunchToken = "4919441018164e5680ec4215d8bc19e7",
+        };
+
+        Assert.Equal(withToken.LaunchToken, RoundTrip(withToken).LaunchToken);
+        Assert.Contains("\"launchToken\"", JsonSerializer.Serialize(withToken, ProtocolJson.Options));
+
+        // A client that connected on its own sends no token, and the field is omitted rather
+        // than serialized as null — the wire stays byte-identical to what a pre-0.12 client
+        // produced, which is what keeps an older hub's parser happy.
+        var withoutToken = new RegisterMessage
+        {
+            ClientId = "myapp",
+            ProcessId = 42,
+            ProtocolVersion = ProtocolVersion.Current,
+        };
+
+        var json = JsonSerializer.Serialize(withoutToken, ProtocolJson.Options);
+        Assert.DoesNotContain("launchToken", json);
+        Assert.Null(RoundTrip(withoutToken).LaunchToken);
+    }
+
+    [Fact]
+    public void RegisterMessage_From_A_Peer_That_Never_Heard_Of_LaunchToken_Still_Parses()
+    {
+        // The additive-only promise, from the other direction: a v1 client's Register has no
+        // launchToken at all, and must deserialize with the field simply null rather than
+        // failing the handshake. This is why the field needed no protocol version bump.
+        const string v1Json =
+            """{"clientId":"legacy","displayName":"Legacy App","processId":7,"protocolVersion":1}""";
+
+        var back = JsonSerializer.Deserialize<RegisterMessage>(v1Json, ProtocolJson.Options);
+
+        Assert.NotNull(back);
+        Assert.Equal("legacy", back!.ClientId);
+        Assert.Equal(1, back.ProtocolVersion);
+        Assert.Null(back.LaunchToken);
+    }
+
+    [Fact]
     public void RegisterMessage_OwnsWindows_RoundTrips_And_Uses_Camel_Property()
     {
         // finding-2 Fix B: the client reports window-ownership on Register so the hub can

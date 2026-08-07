@@ -42,26 +42,42 @@ public sealed class HubUpdater : IAsyncDisposable
     /// <param name="applyAndRestart">The terminal "apply the staged update and restart" action.</param>
     /// <param name="interval">How often to poll for a newer release.</param>
     /// <param name="log">Sink for human-readable status lines. Optional.</param>
+    /// <param name="agentSessionCount">
+    /// How many AI agents are connected. Counting apps alone was never the whole question:
+    /// restarting the hub kills every agent's MCP session too, and an agent mid-task with no
+    /// app attached would have had the ground pulled out from under it.
+    /// </param>
     public HubUpdater(
         IClientBroker broker,
         Func<CancellationToken, Task<string?>> checkAndDownload,
         Action applyAndRestart,
         TimeSpan interval,
-        Action<string>? log = null)
+        Action<string>? log = null,
+        Func<int>? agentSessionCount = null)
     {
         _broker = broker ?? throw new ArgumentNullException(nameof(broker));
         _checkAndDownload = checkAndDownload ?? throw new ArgumentNullException(nameof(checkAndDownload));
         _applyAndRestart = applyAndRestart ?? throw new ArgumentNullException(nameof(applyAndRestart));
         _interval = interval > TimeSpan.Zero ? interval : TimeSpan.FromHours(1);
         _log = log ?? (_ => { });
+        _agentSessionCount = agentSessionCount;
     }
+
+    private readonly Func<int>? _agentSessionCount;
+
+    /// <summary>
+    /// Re-checks whether the hub has gone idle. Wired to the session-changed signal so a
+    /// staged update lands the moment the last agent leaves, rather than at the next poll.
+    /// </summary>
+    public void PokeIdle() => TryApplyIfIdle();
 
     /// <summary>
     /// Wires a GitHub-backed updater for <paramref name="repoUrl"/>. Returns <c>null</c> when the
     /// current process is not a Velopack install (e.g. a dev build) — there is nothing to update.
     /// </summary>
     public static HubUpdater? CreateGithub(
-        IClientBroker broker, string repoUrl, TimeSpan interval, Action<string>? log = null)
+        IClientBroker broker, string repoUrl, TimeSpan interval, Action<string>? log = null,
+        Func<int>? agentSessionCount = null)
     {
         var manager = new UpdateManager(new GithubSource(repoUrl, accessToken: null, prerelease: false));
         if (!manager.IsInstalled)
@@ -90,7 +106,7 @@ public sealed class HubUpdater : IAsyncDisposable
                 manager.ApplyUpdatesAndRestart(pending.TargetFullRelease); // exits + relaunches
         }
 
-        return new HubUpdater(broker, CheckAndDownload, ApplyAndRestart, interval, log);
+        return new HubUpdater(broker, CheckAndDownload, ApplyAndRestart, interval, log, agentSessionCount);
     }
 
     /// <summary>True once a newer release is downloaded and only waiting for an idle hub.</summary>
@@ -165,6 +181,9 @@ public sealed class HubUpdater : IAsyncDisposable
 
         if (_broker.ListClients().Count > 0)
             return; // a client is connected — keep the staged update and wait for it to drop
+
+        if (_agentSessionCount?.Invoke() is > 0)
+            return; // an AI agent is connected — restarting would kill its session mid-task
 
         if (Interlocked.Exchange(ref _applying, 1) != 0)
             return; // already applying (the apply is terminal; guard against a double trigger)

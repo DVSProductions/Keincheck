@@ -130,6 +130,10 @@ public sealed class BrokerClient : IAsyncDisposable
             ProtocolVersion = protocolVersion,
             OwnsWindows = await OwnsWindowsAsync(ct).ConfigureAwait(false),
             ClientVersion = ClientAssemblyVersion,
+            // Only set when the hub started this process. Echoing it lets the hub give the
+            // instance to the agent that asked for it, even though the process that
+            // registers may not be the one the hub actually started.
+            LaunchToken = LaunchToken,
         }, cancellationToken: ct).ConfigureAwait(false);
 
         // 2. Report tool catalog. ownsWindows is recomputed here (not just at register)
@@ -252,6 +256,26 @@ public sealed class BrokerClient : IAsyncDisposable
     /// Strictly best-effort: any failure reports null rather than blocking registration.
     /// </summary>
     private static readonly string? ClientAssemblyVersion = ResolveClientAssemblyVersion();
+
+    /// <summary>
+    /// The launch token the hub put in this process's environment, if it started us. Read
+    /// once at type load so the value keeps being echoed on every reconnect — an app that
+    /// drops and comes back is still the instance that agent asked for.
+    /// </summary>
+    private static readonly string? LaunchToken = ReadLaunchToken();
+
+    private static string? ReadLaunchToken()
+    {
+        try
+        {
+            var value = Environment.GetEnvironmentVariable(PipeNames.LaunchTokenEnvVar);
+            return string.IsNullOrWhiteSpace(value) ? null : value;
+        }
+        catch
+        {
+            return null; // best-effort: never block registration over this
+        }
+    }
 
     private static string? ResolveClientAssemblyVersion()
     {

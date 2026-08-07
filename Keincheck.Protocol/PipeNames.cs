@@ -37,6 +37,14 @@ public static class PipeNames
     /// </summary>
     public static string McpSessionPipe(string token) => $"Keincheck.mcp.{UserScope}.{Sanitize(token)}";
 
+    /// <summary>
+    /// The environment variable the hub sets on a process it launches, and that the client
+    /// echoes back in <see cref="RegisterMessage.LaunchToken"/>. It is how the hub knows
+    /// which registration belongs to which launch when the started process is not the one
+    /// that ends up registering (a launcher script, a <c>dotnet</c> host, a shim).
+    /// </summary>
+    public const string LaunchTokenEnvVar = "KEINCHECK_LAUNCH_TOKEN";
+
     private static string Sanitize(string raw)
     {
         if (string.IsNullOrEmpty(raw))

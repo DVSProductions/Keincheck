@@ -42,7 +42,7 @@ internal sealed class PipeBrokerHarness : IAsyncDisposable
     public event EventHandler<BrokerClientInfo>? ClientDown;
 
     /// <summary>The client whose tools the broker currently advertises (null = none).</summary>
-    public string? ActiveClientId
+    public string? DefaultClientId
     {
         get { lock (_gate) return _active; }
         set

@@ -36,35 +36,223 @@ public sealed class HubMcpServer : IAsyncDisposable
 {
     private readonly IClientBroker _broker;
     private readonly HubOptions _options;
-    private readonly HubRecorder _recorder = new();
+    private readonly ClientClaimRegistry _claims;
     private WebApplication? _web;
 
-    // The live MCP servers we can notify of list changes / log messages. Each session
-    // registers its stable server once at the transport boundary (see RegisterSession) and
-    // is removed when the session ends, so this stays bounded to the live session count.
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<McpServer, byte> _servers = new();
+    /// <summary>Who is currently allowed to drive each app instance.</summary>
+    public ClientClaimRegistry Claims => _claims;
+
+    // The live agent sessions, keyed by their STABLE server (the one notifications go to).
+    // Each session is added once at the transport boundary (see RegisterSession) and removed
+    // when it ends, so this stays bounded to the live session count.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<McpServer, HubSession> _sessions = new();
+
+    // Fallback resolution channel. Both transports await RunAsync inside a method we own, so
+    // setting this immediately before that await puts the session in the execution context
+    // every handler invocation for the session inherits. Used only if the service-provider
+    // and server-identity lookups both miss.
+    private readonly AsyncLocal<HubSession?> _ambient = new();
+
+    // Monotonic per-name counters behind agent labels ("claude-code-1", "claude-code-2").
+    private readonly Dictionary<string, int> _labelCounters = new(StringComparer.OrdinalIgnoreCase);
 
     // Number of live MCP sessions currently registered for notifications (test seam).
-    internal int ConnectedSessionCount => _servers.Count;
+    internal int ConnectedSessionCount => _sessions.Count;
+
+    /// <summary>Raised when an agent connects, disconnects, or changes what it is driving.</summary>
+    internal event Action? SessionsChanged;
+
+    /// <summary>A point-in-time projection of every connected agent, for the tray and status.</summary>
+    public IReadOnlyList<HubSessionInfo> SessionSnapshots() =>
+        _sessions.Values.Select(s => s.Snapshot()).ToList();
 
     /// <summary>
-    /// Registers a live session's <b>stable</b> server so it receives list-changed / log
-    /// notifications; pair with <see cref="UnregisterSession"/> when the session ends. Call
-    /// once per session at the transport boundary (HubPipeMcpListener / the HTTP
-    /// RunSessionHandler), never per request: <c>request.Server</c> is a fresh per-request
-    /// wrapper, so adding it on every <c>tools/list</c> grew this set without bound.
+    /// Creates the state object for one agent connection, seeded with the hub-wide default
+    /// selection so a lone agent still finds a client already selected — the single-agent
+    /// behaviour this whole mechanism has to leave untouched.
     /// </summary>
-    internal void RegisterSession(McpServer server) => _servers.TryAdd(server, 0);
+    internal HubSession CreateSession()
+    {
+        var session = new HubSession();
+        session.SetActive(_broker.DefaultClientId);
+        return session;
+    }
 
-    internal void UnregisterSession(McpServer server) => _servers.TryRemove(server, out _);
+    /// <summary>
+    /// Binds a session to its <b>stable</b> server so it receives list-changed / log
+    /// notifications; pair with <see cref="EndSession"/> when the session ends. Call once per
+    /// session at the transport boundary (HubPipeMcpListener / the HTTP RunSessionHandler),
+    /// never per request: <c>request.Server</c> is a fresh per-request wrapper, so adding it
+    /// on every <c>tools/list</c> grew this collection without bound.
+    /// </summary>
+    internal void RegisterSession(McpServer server, HubSession session)
+    {
+        session.AttachServer(server);
+        _sessions[server] = session;
+        SessionsChanged?.Invoke();
+    }
 
-    private HubMcpServer(IClientBroker broker, HubOptions options)
+    /// <summary>Drops a finished session (and everything it owned: selection, recording, claims).</summary>
+    internal void EndSession(HubSession session)
+    {
+        // Free whatever this agent was driving. Without this a crashed agent would hold its
+        // app hostage until the idle timeout, and a tidy one would hold it forever.
+        _claims.ReleaseSession(session.Id);
+
+        if (session.Server is { } server)
+            _sessions.TryRemove(server, out _);
+        else
+            foreach (var kv in _sessions.Where(kv => kv.Value == session).ToList())
+                _sessions.TryRemove(kv.Key, out _);
+
+        SessionsChanged?.Invoke();
+    }
+
+    /// <summary>
+    /// Makes the session the ambient one for everything awaited inside
+    /// <paramref name="body"/> — the last-resort resolution channel.
+    /// </summary>
+    internal async Task RunSessionAsync(HubSession session, Func<Task> body)
+    {
+        _ambient.Value = session;
+        try { await body().ConfigureAwait(false); }
+        finally { _ambient.Value = null; }
+    }
+
+    /// <summary>
+    /// Finds the agent session a request belongs to.
+    /// </summary>
+    /// <remarks>
+    /// Three channels, because <c>request.Server</c> is a per-request wrapper and is
+    /// therefore never reference-equal to the stable server a session registered:
+    /// <list type="number">
+    ///   <item>the per-session service provider — the pipe listener builds one container per
+    ///   session and registers the session in it, so this is exact and always hits there;</item>
+    ///   <item>a direct hit on the stable server, for any transport that hands handlers the
+    ///   real thing;</item>
+    ///   <item>the transport's session id, which is what identifies a streamable-HTTP
+    ///   session — that host shares one service container across sessions, and its handlers
+    ///   run on ASP.NET request threads rather than inside the session's own
+    ///   <c>RunAsync</c>, so neither of the first two channels reaches it;</item>
+    ///   <item>the ambient execution-context value set around <c>RunAsync</c>, as a
+    ///   last resort for any transport that dispatches from that loop.</item>
+    /// </list>
+    /// A null return means the request arrived on a session the hub is not tracking; callers
+    /// degrade to the meta-tool-only catalog rather than guessing at someone else's selection.
+    /// </remarks>
+    private HubSession? ResolveSession(MessageContext ctx)
+    {
+        if (ctx.Services?.GetService(typeof(HubSession)) is HubSession fromContainer)
+            return fromContainer;
+
+        if (ctx.Server is { } server)
+        {
+            if (_sessions.TryGetValue(server, out var direct))
+                return direct;
+
+            if (server.SessionId is { Length: > 0 } sessionId)
+            {
+                foreach (var kv in _sessions)
+                {
+                    if (string.Equals(kv.Key.SessionId, sessionId, StringComparison.Ordinal))
+                        return kv.Value;
+                }
+            }
+        }
+
+        return _ambient.Value;
+    }
+
+    /// <summary>
+    /// Gives a session its display name on first use. Deferred rather than done at creation
+    /// because the MCP client only reports who it is during <c>initialize</c>, which happens
+    /// after the transport boundary has already built the session.
+    /// </summary>
+    private HubSession? EnsureLabel(HubSession? session)
+    {
+        if (session is null || session.Label.Length > 0)
+            return session;
+
+        var reported = session.Server?.ClientInfo?.Name;
+        var name = SanitizeLabel(reported);
+        lock (_labelCounters)
+        {
+            _labelCounters.TryGetValue(name, out var n);
+            _labelCounters[name] = ++n;
+            session.Label = $"{name}-{n}";
+        }
+        return session;
+    }
+
+    /// <summary>Reduces a client-reported name to a compact, log-safe label stem.</summary>
+    private static string SanitizeLabel(string? reported)
+    {
+        if (string.IsNullOrWhiteSpace(reported))
+            return "agent";
+
+        var sb = new System.Text.StringBuilder(Math.Min(reported.Length, 32));
+        foreach (var c in reported.Trim())
+        {
+            if (sb.Length >= 32)
+                break;
+            var ok = c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '.' or '-' or '_';
+            sb.Append(ok ? c : '-');
+        }
+
+        var result = sb.ToString().Trim('-', '.');
+        return result.Length == 0 ? "agent" : result;
+    }
+
+    private HubMcpServer(IClientBroker broker, HubOptions options, ClientClaimRegistry? claims)
     {
         _broker = broker;
         _options = options;
+        _claims = claims ?? new ClientClaimRegistry(
+            options.ClaimIdleTimeout, (broker as PipeClientBroker)?.Audit);
+
+        // The broker consults claims too, to resolve "an instance nobody is driving" for
+        // wait filters. Point it at the same registry rather than leaving it to be wired up
+        // separately, where forgetting would silently degrade those filters to "any instance".
+        if (broker is PipeClientBroker pipeBroker)
+            pipeBroker.Claims ??= _claims;
         _broker.ClientUpdated += OnCatalogMayHaveChanged;
         _broker.ClientConnected += OnClientConnected;
         _broker.ClientDown += OnClientDown;
+        _broker.LaunchRegistered += OnLaunchRegistered;
+    }
+
+    /// <summary>
+    /// An instance the hub started for one agent has registered. That agent gets it outright:
+    /// selected and claimed, so it can drive its own build immediately without racing anyone.
+    /// </summary>
+    /// <remarks>
+    /// This is what makes several agents on one codebase workable. Three agents each build
+    /// their worktree and launch it; all three self-report the same app id and land as
+    /// <c>myapp#1</c>/<c>#2</c>/<c>#3</c>. Without affinity each agent would have to guess
+    /// which instance is its own — and the guess is not merely awkward, it is silently wrong,
+    /// because driving a sibling's app looks like it worked.
+    /// </remarks>
+    private void OnLaunchRegistered(object? sender, ClientInfo info)
+    {
+        if (info.LaunchSessionId is not { } ownerId)
+            return;
+
+        var owner = _sessions.Values.FirstOrDefault(s => s.Id == ownerId);
+        if (owner is null)
+            return; // the agent gave up waiting and disconnected; leave the instance free
+
+        owner.SetActive(info.ClientId);
+
+        // force: the hub started this process a moment ago on this agent's behalf, so nobody
+        // else can have a legitimate claim on it. A claim deliberately survives a client
+        // disconnect (that is what lets a rebuild-relaunch loop keep the app you were
+        // driving), which means a stale one from the previous incarnation is still sitting on
+        // the hub id. Without force it would win, and a forced restart would kill another
+        // agent's app and then refuse to let you drive the replacement.
+        _claims.Acquire(info.ClientId, owner.Id, owner.Label, ClaimOrigin.Launch, force: true);
+
+        SessionsChanged?.Invoke();
+        RaiseListChanged(new[] { owner });
     }
 
     /// <summary>
@@ -72,12 +260,13 @@ public sealed class HubMcpServer : IAsyncDisposable
     /// endpoint via the broker). Returns a handle; dispose to stop. The Phase-B Hub
     /// owns single-instance election and the tray UI around this.
     /// </summary>
-    public static HubMcpServer Start(IClientBroker broker, HubOptions options)
+    public static HubMcpServer Start(
+        IClientBroker broker, HubOptions options, ClientClaimRegistry? claims = null)
     {
         ArgumentNullException.ThrowIfNull(broker);
         ArgumentNullException.ThrowIfNull(options);
 
-        var hub = new HubMcpServer(broker, options);
+        var hub = new HubMcpServer(broker, options, claims);
         hub.StartHttp();
         return hub;
     }
@@ -101,9 +290,15 @@ public sealed class HubMcpServer : IAsyncDisposable
                 o.RunSessionHandler = async (_, server, ct) =>
                 {
                     var mcp = (McpServer)server;
-                    RegisterSession(mcp);
-                    try { await mcp.RunAsync(ct).ConfigureAwait(false); }
-                    finally { UnregisterSession(mcp); }
+                    var session = CreateSession();
+                    RegisterSession(mcp, session);
+                    try
+                    {
+                        // The HTTP host shares one service container across sessions, so the
+                        // ambient channel is what lets a handler tell these sessions apart.
+                        await RunSessionAsync(session, () => mcp.RunAsync(ct)).ConfigureAwait(false);
+                    }
+                    finally { EndSession(session); }
                 };
             });
 #pragma warning restore MCPEXP002
@@ -146,11 +341,17 @@ public sealed class HubMcpServer : IAsyncDisposable
         // Session registration happens once per session at the transport boundary
         // (HubPipeMcpListener / the HTTP RunSessionHandler), NOT here: request.Server is a
         // fresh per-request wrapper, so adding it on every tools/list leaked unboundedly.
-        var result = new ListToolsResult { Tools = BuildToolList() };
+        var session = EnsureLabel(ResolveSession(request));
+        var result = new ListToolsResult { Tools = BuildToolList(session) };
         return ValueTask.FromResult(result);
     }
 
-    private List<Tool> BuildToolList()
+    /// <summary>
+    /// The catalog <paramref name="session"/> sees: the meta-tools, plus (in dynamic mode)
+    /// the tools of the client <i>that agent</i> selected. Computed per session so one
+    /// agent's selection cannot rewrite another's tool list mid-conversation.
+    /// </summary>
+    private List<Tool> BuildToolList(HubSession? session)
     {
         // Meta-tools first (always present). In dynamic tooling mode the active client's
         // tools are appended verbatim; in static mode the catalog stops here, so it is
@@ -160,7 +361,7 @@ public sealed class HubMcpServer : IAsyncDisposable
         if (!_options.DynamicTooling)
             return tools;
 
-        var activeId = _broker.ActiveClientId;
+        var activeId = session?.ActiveClientId;
         if (activeId is not null && _broker.ClientStatus(activeId) is { IsConnected: true } active)
         {
             foreach (var d in active.Tools)
@@ -200,27 +401,36 @@ public sealed class HubMcpServer : IAsyncDisposable
         var p = request.Params!;
         var name = p.Name;
         var args = ArgsToElement(p.Arguments);
+        var session = EnsureLabel(ResolveSession(request));
+
+        if (session is null)
+        {
+            return HubMetaTools.ErrorResult(
+                "This MCP session is not tracked by the hub, so it has no client selection of "
+                + "its own. Reconnect and try again.");
+        }
 
         // 1) Record/replay/export meta-tools are routed HERE, before the pure dispatcher,
         //    because they need the recorder/broker state the server owns.
-        if (HandleRecordTool(name, args, ct) is { } recordResult)
+        if (HandleRecordTool(session, name, args, ct) is { } recordResult)
             return await recordResult.ConfigureAwait(false);
 
         // 1b) hub_call_tool — the static-mode generic proxy — unwraps { tool, args, client }
         //     and joins the normal proxy path below.
         if (name == HubMetaTools.CallTool)
-            return await HandleCallToolDispatchAsync(args, ct).ConfigureAwait(false);
+            return await HandleCallToolDispatchAsync(session, args, ct).ConfigureAwait(false);
 
         // 2) The remaining meta-tools are pure and dispatched in-hub.
         if (HubMetaTools.IsMetaTool(name))
         {
-            return await HubMetaTools
-                .DispatchAsync(_broker, name, args, RaiseListChanged, ct)
-                .ConfigureAwait(false);
+            var context = new HubToolContext(
+                _broker, _claims, session, ConnectedSessionCount, _options,
+                () => RaiseListChanged(new[] { session }));
+            return await HubMetaTools.DispatchAsync(context, name, args, ct).ConfigureAwait(false);
         }
 
         // 3) Everything else is a proxied tool.
-        return await InvokeProxiedToolAsync(name, args, ct).ConfigureAwait(false);
+        return await InvokeProxiedToolAsync(session, name, args, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -229,7 +439,8 @@ public sealed class HubMcpServer : IAsyncDisposable
     /// <c>client</c> member is re-attached to the forwarded arguments so the existing
     /// per-call override (<see cref="ResolveTarget"/>) applies unchanged.
     /// </summary>
-    private ValueTask<CallToolResult> HandleCallToolDispatchAsync(JsonElement? args, CancellationToken ct)
+    private ValueTask<CallToolResult> HandleCallToolDispatchAsync(
+        HubSession session, JsonElement? args, CancellationToken ct)
     {
         var tool = TryGetString(args, "tool");
         if (string.IsNullOrEmpty(tool))
@@ -247,7 +458,7 @@ public sealed class HubMcpServer : IAsyncDisposable
             forwarded = WithProperty(forwarded, HubMetaTools.ClientOverrideArg, c.GetString()!);
         }
 
-        return InvokeProxiedToolAsync(tool!, forwarded, ct);
+        return InvokeProxiedToolAsync(session, tool!, forwarded, ct);
     }
 
     /// <summary>
@@ -256,11 +467,11 @@ public sealed class HubMcpServer : IAsyncDisposable
     /// the invoke timeout, capture the step when recording, and shape failures.
     /// </summary>
     private async ValueTask<CallToolResult> InvokeProxiedToolAsync(
-        string name, JsonElement? args, CancellationToken ct)
+        HubSession session, string name, JsonElement? args, CancellationToken ct)
     {
-        // Resolve the target client: an explicit 'client' argument overrides the active
+        // Resolve the target client: an explicit 'client' argument overrides this session's
         // selection for this one call.
-        var (targetId, toolArgs) = ResolveTarget(name, args);
+        var (targetId, toolArgs) = ResolveTarget(session, name, args);
         if (targetId is null)
         {
             return HubMetaTools.ErrorResult(
@@ -278,21 +489,28 @@ public sealed class HubMcpServer : IAsyncDisposable
 
         var toolName = StripQualifier(name, targetId);
 
+        // One driver per instance. Reads never contend, so they only keep the owner's claim
+        // warm; a write takes the claim if the instance is free and is refused (with a way
+        // out) if another agent is driving it.
+        if (CheckClaim(session, known, toolName) is { } conflict)
+            return conflict;
+
         try
         {
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeoutCts.CancelAfter(_options.InvokeTimeout);
 
             var clientResult = await _broker
-                .InvokeOnClientAsync(targetId, toolName, toolArgs, timeoutCts.Token)
+                .InvokeOnClientAsync(targetId, toolName, toolArgs, timeoutCts.Token, session.Label)
                 .ConfigureAwait(false);
 
             var result = ToCallToolResult(clientResult);
 
-            // Capture the proxied step if a recording is active. We record the forwarded
-            // (post-resolve) args and the success flag, never meta/record tools (they are
-            // intercepted above and never reach this proxy path).
-            _recorder.Capture(new RecordedStep
+            // Capture the proxied step if THIS agent is recording. Per-session, so two agents
+            // recording at once produce two clean scenarios rather than one interleaved mess.
+            // We record the forwarded (post-resolve) args and the success flag, never
+            // meta/record tools (they are intercepted above and never reach this proxy path).
+            session.Recorder.Capture(new RecordedStep
             {
                 ClientId = targetId,
                 ToolName = toolName,
@@ -317,6 +535,34 @@ public sealed class HubMcpServer : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Applies the one-driver-per-instance rule to a call about to be forwarded. Returns the
+    /// structured refusal when another agent owns the instance, or null to proceed.
+    /// </summary>
+    /// <remarks>
+    /// A read-only client is skipped entirely: the broker refuses its mutating calls anyway,
+    /// and taking a claim for a call that is about to be rejected would let an agent lock an
+    /// app it is not even allowed to drive.
+    /// </remarks>
+    private CallToolResult? CheckClaim(HubSession session, ClientInfo target, string toolName)
+    {
+        var mutating = !ToolClassification.IsReadOnly(target.Tools, toolName);
+
+        if (!mutating || !_options.EnforceWriteClaims || target.ReadOnly)
+        {
+            _claims.TouchIfOwner(target.ClientId, session.Id);
+            return null;
+        }
+
+        if (_claims.CheckWrite(target.ClientId, session.Id, session.Label) is not ClaimDenied denied)
+            return null;
+
+        _claims.RecordDenied(target.ClientId, toolName, session.Label, denied.Owner);
+        return HubMetaTools.ClaimConflictError(
+            target.ClientId, toolName, denied,
+            HubMetaTools.UnclaimedSiblings(_broker, _claims, target));
+    }
+
     // ---- record / replay / export -----------------------------------------
 
     /// <summary>
@@ -326,50 +572,52 @@ public sealed class HubMcpServer : IAsyncDisposable
     /// These live here (not in <see cref="HubMetaTools"/>) because they need the server's
     /// <see cref="HubRecorder"/> and the broker's invoke path.
     /// </summary>
-    private ValueTask<CallToolResult>? HandleRecordTool(string name, JsonElement? args, CancellationToken ct)
+    private ValueTask<CallToolResult>? HandleRecordTool(
+        HubSession session, string name, JsonElement? args, CancellationToken ct)
     {
         return name switch
         {
-            HubMetaTools.RecordStart  => ValueTask.FromResult(RecordStart(args)),
-            HubMetaTools.RecordStop   => ValueTask.FromResult(RecordStop()),
-            HubMetaTools.RecordStatus => ValueTask.FromResult(RecordStatus()),
-            HubMetaTools.Replay       => ReplayAsync(args, ct),
-            HubMetaTools.ExportTest   => ValueTask.FromResult(ExportTest(args)),
+            HubMetaTools.RecordStart  => ValueTask.FromResult(RecordStart(session, args)),
+            HubMetaTools.RecordStop   => ValueTask.FromResult(RecordStop(session)),
+            HubMetaTools.RecordStatus => ValueTask.FromResult(RecordStatus(session)),
+            HubMetaTools.Replay       => ReplayAsync(session, args, ct),
+            HubMetaTools.ExportTest   => ValueTask.FromResult(ExportTest(session, args)),
             _ => null,
         };
     }
 
-    private CallToolResult RecordStart(JsonElement? args)
+    private static CallToolResult RecordStart(HubSession session, JsonElement? args)
     {
         var name = TryGetString(args, "name");
-        _recorder.Start(name);
+        session.Recorder.Start(name);
         return HubMetaTools.JsonResult(new { recording = true, name });
     }
 
-    private CallToolResult RecordStop()
+    private static CallToolResult RecordStop(HubSession session)
     {
-        var steps = _recorder.Stop();
+        var steps = session.Recorder.Stop();
         return HubMetaTools.JsonResult(new { recording = false, steps });
     }
 
-    private CallToolResult RecordStatus() =>
+    private static CallToolResult RecordStatus(HubSession session) =>
         HubMetaTools.JsonResult(new
         {
-            recording = _recorder.IsRecording,
-            steps = _recorder.Count,
-            name = _recorder.Name,
+            recording = session.Recorder.IsRecording,
+            steps = session.Recorder.Count,
+            name = session.Recorder.Name,
         });
 
     /// <summary>
     /// Re-issues every buffered step to its original client, in order. Steps whose client
     /// is no longer connected are labelled skipped instead of failing the whole replay.
     /// </summary>
-    private async ValueTask<CallToolResult> ReplayAsync(JsonElement? args, CancellationToken ct)
+    private async ValueTask<CallToolResult> ReplayAsync(
+        HubSession session, JsonElement? args, CancellationToken ct)
     {
         var stopOnError = TryGetBool(args, "stopOnError") ?? false;
         var delayMs = Math.Max(0, TryGetInt(args, "delayMs") ?? 0);
 
-        var steps = _recorder.Snapshot();
+        var steps = session.Recorder.Snapshot();
         var outcomes = new List<object>(steps.Count);
         int ok = 0, failed = 0, skipped = 0;
 
@@ -378,10 +626,20 @@ public sealed class HubMcpServer : IAsyncDisposable
             var step = steps[i];
 
             // A client that has since dropped can't service the step — skip, don't fail.
-            if (_broker.ClientStatus(step.ClientId) is not { IsConnected: true })
+            if (_broker.ClientStatus(step.ClientId) is not { IsConnected: true } stepTarget)
             {
                 skipped++;
                 outcomes.Add(new { i, tool = step.ToolName, client = step.ClientId, ok = false, skipped = true, error = $"client '{step.ClientId}' not connected" });
+                continue;
+            }
+
+            // Replay drives the app for real, so it obeys the same one-driver rule as a live
+            // call — otherwise it would be the obvious way around the claim.
+            if (CheckClaim(session, stepTarget, step.ToolName) is not null)
+            {
+                failed++;
+                outcomes.Add(new { i, tool = step.ToolName, client = step.ClientId, ok = false, error = $"another agent is driving '{step.ClientId}'" });
+                if (stopOnError) break;
                 continue;
             }
 
@@ -394,7 +652,8 @@ public sealed class HubMcpServer : IAsyncDisposable
                 timeoutCts.CancelAfter(_options.InvokeTimeout);
 
                 var res = await _broker
-                    .InvokeOnClientAsync(step.ClientId, step.ToolName, step.ArgsJson, timeoutCts.Token)
+                    .InvokeOnClientAsync(
+                        step.ClientId, step.ToolName, step.ArgsJson, timeoutCts.Token, session.Label)
                     .ConfigureAwait(false);
 
                 if (res.IsError)
@@ -433,19 +692,20 @@ public sealed class HubMcpServer : IAsyncDisposable
     /// <c>"csharp"</c> yields a best-effort xUnit <c>[Fact]</c> skeleton (a starting point,
     /// not guaranteed to compile against any particular harness).
     /// </summary>
-    private CallToolResult ExportTest(JsonElement? args)
+    private static CallToolResult ExportTest(HubSession session, JsonElement? args)
     {
         var format = (TryGetString(args, "format") ?? "json").Trim().ToLowerInvariant();
-        var steps = _recorder.Snapshot();
+        var recorder = session.Recorder;
+        var steps = recorder.Snapshot();
 
         if (format == "csharp")
-            return HubMetaTools.JsonResult(new { format = "csharp", code = BuildCSharpSkeleton(steps, _recorder.Name) });
+            return HubMetaTools.JsonResult(new { format = "csharp", code = BuildCSharpSkeleton(steps, recorder.Name) });
 
         // Default: a replayable JSON scenario document.
         var scenario = new System.Text.Json.Nodes.JsonObject
         {
             ["version"] = 1,
-            ["name"] = _recorder.Name,
+            ["name"] = recorder.Name,
         };
         var stepArray = new System.Text.Json.Nodes.JsonArray();
         foreach (var s in steps)
@@ -570,10 +830,11 @@ public sealed class HubMcpServer : IAsyncDisposable
     /// <summary>
     /// Picks the client a proxied call targets. A literal <c>client</c> property in the
     /// arguments wins (and is stripped from the args forwarded to the tool); otherwise
-    /// the active client is used. When name-qualification is on, a qualified tool name
-    /// (<c>app1.tool</c>) also names the client.
+    /// <i>the calling agent's own</i> selection is used. When name-qualification is on, a
+    /// qualified tool name (<c>app1.tool</c>) also names the client.
     /// </summary>
-    private (string? targetId, JsonElement? args) ResolveTarget(string toolName, JsonElement? args)
+    private (string? targetId, JsonElement? args) ResolveTarget(
+        HubSession session, string toolName, JsonElement? args)
     {
         // (a) qualified name carries the client id.
         if (_options.QualifyToolNames)
@@ -596,8 +857,10 @@ public sealed class HubMcpServer : IAsyncDisposable
             return (overrideId, RemoveProperty(obj, HubMetaTools.ClientOverrideArg));
         }
 
-        // (c) fall back to the active client.
-        return (_broker.ActiveClientId, args);
+        // (c) fall back to the client THIS agent selected. Never the hub-wide default: that
+        // is only a seed for new sessions, and routing on it is exactly how one agent's
+        // hub_select_client used to retarget every other agent's next call.
+        return (session.ActiveClientId, args);
     }
 
     private string StripQualifier(string name, string clientId) =>
@@ -609,32 +872,79 @@ public sealed class HubMcpServer : IAsyncDisposable
 
     // ---- list_changed -----------------------------------------------------
 
+    /// <summary>
+    /// A client's catalog or metadata changed: only the agents actually driving that client
+    /// see a different tool list, so only they are notified.
+    /// </summary>
     private void OnCatalogMayHaveChanged(object? sender, ClientInfo info)
     {
-        // Only the active client's changes alter the advertised list.
-        if (_broker.ActiveClientId is not null && info.ClientId != _broker.ActiveClientId)
-            return;
-
-        RaiseListChanged();
-    }
-
-    private void OnClientConnected(object? sender, ClientInfo info) => OnCatalogMayHaveChanged(sender, info);
-
-    private void RaiseListChanged()
-    {
-        // Static tooling mode: the catalog never changes, so never emit list_changed.
-        if (!_options.DynamicTooling)
-            return;
-        _ = NotifyToolListChangedAsync();
+        RaiseListChanged(SessionsDriving(info.ClientId));
     }
 
     /// <summary>
-    /// Emits <c>notifications/tools/list_changed</c> to every connected MCP session.
+    /// A client connected. Each agent independently decides whether to adopt it, following
+    /// the same auto-activation rule the hub-wide default uses — except that an instance
+    /// launched on behalf of one specific agent belongs to that agent alone, so nobody else
+    /// auto-selects it out from under them.
     /// </summary>
-    public async Task NotifyToolListChangedAsync()
+    private void OnClientConnected(object? sender, ClientInfo info)
     {
-        foreach (var server in _servers.Keys)
+        var changed = new List<HubSession>();
+        foreach (var session in _sessions.Values)
         {
+            if (info.LaunchSessionId is { } owner && owner != session.Id)
+                continue; // somebody else asked for this instance
+
+            if (session.TryAutoSelect(info))
+                changed.Add(session);
+        }
+
+        if (changed.Count > 0)
+            SessionsChanged?.Invoke();
+        RaiseListChanged(changed);
+    }
+
+    /// <summary>The agents currently driving <paramref name="clientId"/>.</summary>
+    private List<HubSession> SessionsDriving(string clientId) =>
+        _sessions.Values
+            .Where(s => string.Equals(s.ActiveClientId, clientId, StringComparison.Ordinal))
+            .ToList();
+
+    /// <summary>
+    /// Points every agent at <paramref name="clientId"/>. The tray's "make active" affordance:
+    /// a human sitting at the machine overrides what the agents chose, deliberately.
+    /// </summary>
+    public void SelectForAllSessions(string clientId)
+    {
+        var all = _sessions.Values.ToList();
+        foreach (var session in all)
+            session.SetActive(clientId);
+
+        SessionsChanged?.Invoke();
+        RaiseListChanged(all);
+    }
+
+    private void RaiseListChanged(IReadOnlyCollection<HubSession> targets)
+    {
+        // Static tooling mode: the catalog never changes, so never emit list_changed.
+        if (!_options.DynamicTooling || targets.Count == 0)
+            return;
+        _ = NotifyToolListChangedAsync(targets);
+    }
+
+    /// <summary>
+    /// Emits <c>notifications/tools/list_changed</c> to every connected MCP session. Kept as
+    /// the broadcast form for callers that genuinely mean everyone; internal paths target
+    /// only the sessions whose catalog actually changed.
+    /// </summary>
+    public Task NotifyToolListChangedAsync() => NotifyToolListChangedAsync(_sessions.Values.ToList());
+
+    private async Task NotifyToolListChangedAsync(IReadOnlyCollection<HubSession> targets)
+    {
+        foreach (var session in targets)
+        {
+            if (session.Server is not { } server)
+                continue;
             try
             {
                 await server.SendNotificationAsync(
@@ -643,7 +953,7 @@ public sealed class HubMcpServer : IAsyncDisposable
             }
             catch
             {
-                _servers.TryRemove(server, out _); // dead session
+                _sessions.TryRemove(server, out _); // dead session
             }
         }
     }
@@ -652,10 +962,21 @@ public sealed class HubMcpServer : IAsyncDisposable
 
     private void OnClientDown(object? sender, ClientInfo info)
     {
-        // If the active client dropped, its tools just disappeared from the catalog.
-        if (info.ClientId == _broker.ActiveClientId)
-            RaiseListChanged();
+        // Every agent that was driving it just lost its tools; each remembers the id so the
+        // client's reconnect reclaims that agent's selection.
+        var affected = new List<HubSession>();
+        foreach (var session in _sessions.Values)
+        {
+            if (session.TryHandleClientDown(info.ClientId))
+                affected.Add(session);
+        }
 
+        if (affected.Count > 0)
+            SessionsChanged?.Invoke();
+        RaiseListChanged(affected);
+
+        // The logging notification stays a broadcast: any agent may have been targeting this
+        // client per-call with a "client" argument, without ever selecting it.
         _ = NotifyClientDownAsync(info);
     }
 
@@ -687,7 +1008,7 @@ public sealed class HubMcpServer : IAsyncDisposable
             Data = data,
         };
 
-        foreach (var server in _servers.Keys)
+        foreach (var server in _sessions.Keys)
         {
             try
             {
@@ -698,7 +1019,7 @@ public sealed class HubMcpServer : IAsyncDisposable
             }
             catch
             {
-                _servers.TryRemove(server, out _); // dead session
+                _sessions.TryRemove(server, out _); // dead session
             }
         }
     }
@@ -749,6 +1070,7 @@ public sealed class HubMcpServer : IAsyncDisposable
         _broker.ClientUpdated -= OnCatalogMayHaveChanged;
         _broker.ClientConnected -= OnClientConnected;
         _broker.ClientDown -= OnClientDown;
+        _broker.LaunchRegistered -= OnLaunchRegistered;
 
         if (_web is not null)
         {

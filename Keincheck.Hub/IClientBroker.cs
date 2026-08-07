@@ -29,24 +29,42 @@ public interface IClientBroker
     ClientInfo? ClientStatus(string clientId);
 
     /// <summary>
-    /// The client whose tools the hub is currently advertising to the AI (the
-    /// "active" client). Null when no client is selected/connected. Setting it makes
-    /// the broker raise an active-changed signal so the MCP server re-lists tools.
+    /// The hub-wide <b>default</b> selection: what a freshly connected agent starts out
+    /// driving, and what the tray shows when no agent is connected. Null when nothing has
+    /// been selected. Setting it raises a changed signal so the tray and any seeded session
+    /// re-list.
     /// </summary>
-    string? ActiveClientId { get; set; }
+    /// <remarks>
+    /// This is deliberately <i>not</i> where tool calls are routed. Each MCP session owns its
+    /// own selection (<see cref="HubSession.ActiveClientId"/>), because several agents share
+    /// one hub and a single hub-wide slot meant one agent's <c>hub_select_client</c> silently
+    /// retargeted every other agent's next call. What survives here is the auto-activation
+    /// state machine — first client of the run, same client reclaiming the slot it dropped
+    /// from, never a remote client on its own — which still decides what a new session is
+    /// handed when it arrives.
+    /// </remarks>
+    string? DefaultClientId { get; set; }
 
     /// <summary>
     /// Launches a known app by id (e.g. via its recorded executable path). Returns
-    /// the launched process id, or throws if the app is unknown / cannot be started.
-    /// The client connects back over the pipe on its own.
+    /// the launched process id and a launch id, or throws if the app is unknown / cannot be
+    /// started. The client connects back over the pipe on its own.
     /// </summary>
-    Task<int> LaunchClientAsync(string clientId, CancellationToken cancellationToken = default);
+    Task<LaunchResult> LaunchClientAsync(
+        string clientId, LaunchOptions? launch = null, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Restarts a client: signals/terminates the running instance (if any) and
     /// launches it again. Returns the new process id.
     /// </summary>
-    Task<int> RestartClientAsync(string clientId, CancellationToken cancellationToken = default);
+    Task<LaunchResult> RestartClientAsync(
+        string clientId, LaunchOptions? launch = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Raised when a client that the hub launched on an agent's behalf finishes registering,
+    /// so that agent (and only that agent) can adopt the instance.
+    /// </summary>
+    event EventHandler<ClientInfo>? LaunchRegistered;
 
     /// <summary>
     /// Blocks until a connected client matching <paramref name="appIdOrClientId"/> is
@@ -67,13 +85,26 @@ public interface IClientBroker
         string? appIdOrClientId, TimeSpan timeout, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Blocks until a connected client matching <paramref name="filter"/> is available. The
+    /// precise form, for when "any instance of this app" is not good enough — which is the
+    /// normal case once several agents each run their own build of it.
+    /// </summary>
+    Task<ClientInfo?> WaitForClientAsync(
+        ClientWaitFilter filter, TimeSpan timeout, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Forwards a tool call to the owning client over the pipe and awaits its
     /// <see cref="ToolResultMessage"/>. Throws if the client is not connected, the
     /// client is read-only and the tool mutates, or the call times out.
     /// </summary>
+    /// <param name="agent">
+    /// The label of the agent session making the call, recorded in the audit trail. Optional
+    /// so existing callers keep compiling; without it the trail cannot answer "which agent
+    /// did that", which is the question that matters once several share one hub.
+    /// </param>
     Task<ToolResultMessage> InvokeOnClientAsync(
         string clientId, string toolName, System.Text.Json.JsonElement? argumentsJson,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default, string? agent = null);
 
     /// <summary>Raised when a client connects (first <see cref="RegisterMessage"/>).</summary>
     event EventHandler<ClientInfo>? ClientConnected;
@@ -87,6 +118,97 @@ public interface IClientBroker
 
     /// <summary>Raised when a client disconnects (graceful goodbye or transport drop).</summary>
     event EventHandler<ClientInfo>? ClientDown;
+}
+
+/// <summary>
+/// Which client an agent is waiting for. Every member narrows the match.
+/// </summary>
+/// <remarks>
+/// A bare app id used to be the only filter, and it resolves to whichever matching instance
+/// the registry happens to enumerate first. That was fine when one app meant one instance; it
+/// is a coin toss once several agents each run their own worktree build, and losing the toss
+/// means driving somebody else's app while believing it is yours.
+/// </remarks>
+public sealed record ClientWaitFilter
+{
+    /// <summary>The hub id, bare app id, or <c>AppId@Host</c> to match. Null matches any.</summary>
+    public string? IdOrAppId { get; init; }
+
+    /// <summary>
+    /// Match only the instance produced by this launch (from <see cref="LaunchResult.LaunchId"/>).
+    /// The precise answer to "the app I just started", and it beats every other filter.
+    /// </summary>
+    public string? LaunchId { get; init; }
+
+    /// <summary>Match only a client running as this OS process.</summary>
+    public int? ProcessId { get; init; }
+
+    /// <summary>Match only instances no agent is currently driving.</summary>
+    public bool UnclaimedOnly { get; init; }
+
+    /// <summary>Match only instances this agent already holds or launched.</summary>
+    public bool MineOnly { get; init; }
+
+    /// <summary>
+    /// The asking agent. Used to evaluate <see cref="MineOnly"/> and to prefer that agent's own
+    /// instance when several would otherwise match.
+    /// </summary>
+    public Guid? SessionId { get; init; }
+}
+
+/// <summary>
+/// What an agent wants launched, when the recorded profile is not the whole story.
+/// </summary>
+/// <remarks>
+/// The overrides exist for the multi-worktree case: several agents each build their own copy
+/// of the same app and each needs to drive <i>its</i> build, but the persisted launch profile
+/// records only one path — whichever copy registered most recently.
+/// </remarks>
+public sealed record LaunchOptions
+{
+    /// <summary>The executable to start instead of the recorded one.</summary>
+    public string? ExePath { get; init; }
+
+    /// <summary>The working directory to start it in.</summary>
+    public string? WorkingDirectory { get; init; }
+
+    /// <summary>Command-line arguments to pass.</summary>
+    public string? Arguments { get; init; }
+
+    /// <summary>
+    /// Allows <see cref="ExePath"/> to have a different file name than the recorded profile's.
+    /// Off by default: the worktree case is the same binary in a different directory, so a
+    /// different name usually means the wrong app is about to be started.
+    /// </summary>
+    public bool AllowDifferentExecutable { get; init; }
+
+    /// <summary>The agent session asking for the launch, which will be given the instance.</summary>
+    public Guid? SessionId { get; init; }
+
+    /// <summary>That agent's display label, for messages and the audit trail.</summary>
+    public string? SessionLabel { get; init; }
+
+    /// <summary>
+    /// Only the owner of a claimed instance may restart it; force overrides that.
+    /// </summary>
+    public bool Force { get; init; }
+}
+
+/// <summary>The outcome of a launch: the process that was started, and the handle to wait on.</summary>
+/// <param name="ProcessId">The OS process id the hub started.</param>
+/// <param name="LaunchId">
+/// The token to pass to <c>hub_wait_for_client</c> to resolve exactly this instance rather
+/// than whichever copy of the app answers first.
+/// </param>
+public sealed record LaunchResult(int ProcessId, string LaunchId);
+
+/// <summary>Thrown when an operation would disturb an app another agent is driving.</summary>
+public sealed class ClientClaimedException : InvalidOperationException
+{
+    public ClientClaimedException(string message, ClaimInfo owner) : base(message) => Owner = owner;
+
+    /// <summary>The agent that holds the instance.</summary>
+    public ClaimInfo Owner { get; }
 }
 
 /// <summary>How a client is attached to the hub.</summary>
@@ -226,4 +348,27 @@ public sealed record ClientInfo
 
     /// <summary>True when this client is attached over something other than the local pipe.</summary>
     public bool IsRemote => Transport != ClientTransport.Pipe;
+
+    /// <summary>
+    /// The launch this instance came from, when the hub started it on an agent's behalf.
+    /// Returned by <c>hub_launch_client</c> so that agent can wait for exactly the instance
+    /// it asked for rather than whichever copy of the app happens to answer first.
+    /// </summary>
+    public string? LaunchId { get; init; }
+
+    /// <summary>
+    /// The agent session that launched this instance, when the hub started it. Null for a
+    /// client that connected on its own.
+    /// </summary>
+    /// <remarks>
+    /// This is what makes the worktree case work: three agents each build and launch their
+    /// own copy of the same app, all three self-report the same app id, and they land as
+    /// <c>myapp#1</c>/<c>#2</c>/<c>#3</c>. Recording who asked for which one lets the hub
+    /// hand each agent its own instance — auto-selected and auto-claimed for them alone —
+    /// instead of letting whoever registers first be adopted by everybody.
+    /// </remarks>
+    public Guid? LaunchSessionId { get; init; }
+
+    /// <summary>The display label of the agent that launched this instance, for messages and the tray.</summary>
+    public string? LaunchSessionLabel { get; init; }
 }

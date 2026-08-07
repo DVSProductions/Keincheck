@@ -34,6 +34,13 @@ public static class MetaTools
         "hub_remote_issue",
         "hub_remote_disable",
         "hub_remote_revoke",
+        // Static-tooling companions: the discovery + generic-proxy pair an agent that cannot
+        // handle a changing tool list relies on entirely.
+        "hub_list_client_tools",
+        "hub_call_tool",
+        // Write-claims: one driver per app instance when several agents share the hub.
+        "hub_claim_client",
+        "hub_release_client",
     ];
 
     public static IEnumerable<string> Order() => Names.Order();
