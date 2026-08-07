@@ -60,6 +60,51 @@ public sealed class HubSettingsTests : IDisposable
     }
 
     [Fact]
+    public void Tray_Only_Defaults_Per_Platform()
+    {
+        // Windows and macOS guarantee a system tray; Linux does not, so a tray-only hub there
+        // would be a process the user can neither open nor quit.
+        Assert.Equal(!OperatingSystem.IsLinux(), HubSettings.Open(Path_).StartInTrayOnly);
+    }
+
+    [Fact]
+    public void Tray_Only_Round_Trips_Through_Disk()
+    {
+        var flipped = !HubSettings.DefaultTrayOnly;
+
+        HubSettings.Open(Path_).SetStartInTrayOnly(flipped);
+
+        Assert.Equal(flipped, HubSettings.Open(Path_).StartInTrayOnly);
+    }
+
+    [Fact]
+    public void Each_Setting_Persists_Without_Clobbering_The_Other()
+    {
+        var settings = HubSettings.Open(Path_);
+        settings.SetStartAtLogin(false);
+        settings.SetStartInTrayOnly(!HubSettings.DefaultTrayOnly);
+
+        var reloaded = HubSettings.Open(Path_);
+        Assert.False(reloaded.StartAtLogin);
+        Assert.Equal(!HubSettings.DefaultTrayOnly, reloaded.StartInTrayOnly);
+    }
+
+    [Fact]
+    public void File_From_An_Older_Hub_Keeps_Its_Choice_And_Defaults_The_Rest()
+    {
+        // The shape a pre-tray-toggle hub wrote. A property the file does not mention must
+        // fall back to the platform default rather than to `default(bool)` — which on Windows
+        // and macOS would silently turn a tray daemon into one that pops a window at login.
+        Directory.CreateDirectory(_dir);
+        File.WriteAllText(Path_, """{ "StartAtLogin": false }""");
+
+        var settings = HubSettings.Open(Path_);
+
+        Assert.False(settings.StartAtLogin);
+        Assert.Equal(HubSettings.DefaultTrayOnly, settings.StartInTrayOnly);
+    }
+
+    [Fact]
     public void Unwritable_Path_Does_Not_Throw()
     {
         // A directory where the settings file should be: writing can only fail.

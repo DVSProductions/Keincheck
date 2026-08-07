@@ -4,9 +4,9 @@ Four workflows. Two make binaries, two check them.
 
 | Workflow | Trigger | What it proves |
 |---|---|---|
-| [`ci.yml`](../.github/workflows/ci.yml) | main, PR, dispatch | The solution builds and the unit suite passes |
+| [`ci.yml`](../.github/workflows/ci.yml) | main, PR, dispatch | The solution builds and the unit suite passes, on all three platforms |
 | [`e2e.yml`](../.github/workflows/e2e.yml) | main, PR, dispatch | An **installed** hub really drives real apps |
-| [`release.yml`](../.github/workflows/release.yml) | `v*.*.*` tag | Velopack release on GitHub |
+| [`release.yml`](../.github/workflows/release.yml) | `v*.*.*` tag | Velopack releases (Windows, Linux, macOS) on GitHub |
 | [`publish-nuget.yml`](../.github/workflows/publish-nuget.yml) | `v*.*.*` tag, dispatch | Library packages on NuGet.org |
 
 `push` is scoped to `main` on the two test workflows. An unscoped `push:` also matches
@@ -14,8 +14,28 @@ pull-request branches *and* tag pushes, so every commit on an open PR ran twice 
 release tag re-ran a 15-minute job for a commit that had already been tested. Branch work is
 covered by `pull_request`; use `workflow_dispatch` to run against a branch before opening one.
 
-Both build workflows run on `windows-latest`. That is not a preference: `Keincheck.Wpf` is
-`net8.0-windows` with `UseWPF`, so `Keincheck.sln` cannot restore on Linux.
+## Two solutions, one repo
+
+`Keincheck.sln` cannot restore off Windows: `Keincheck.Wpf` is `net8.0-windows` with `UseWPF`,
+and `samples/Keincheck.Wpf.Demo` with it. `Keincheck.CrossPlatform.slnf` is a solution filter
+listing every *other* project, and it is what the Linux and macOS jobs build and test.
+
+So `ci.yml` has two jobs:
+
+| Job | Runner | Scope |
+|---|---|---|
+| `build-test` | `windows-latest` | `Keincheck.sln` — everything, including the WPF adapter |
+| `build-test-unix` | `ubuntu-latest`, `macos-latest` | `Keincheck.CrossPlatform.slnf`, then a hub `dotnet publish` for that platform's RID |
+
+The UI tests run on `Avalonia.Headless`, so the Unix jobs need no display server and no
+`xvfb`. The extra publish step is there because `dotnet build` does not exercise the publish
+path (RID-specific assets, the self-contained apphost, ReadyToRun cross-compilation), and a
+release tag is the wrong place to find out that broke.
+
+`e2e.yml` stays Windows-only: it installs a real Velopack `Setup.exe`.
+
+**Adding a project?** Add it to `Keincheck.CrossPlatform.slnf` too, unless it is Windows-only.
+A project missing from the filter is simply never built on Linux or macOS — silently.
 
 ## Cutting a release
 
@@ -48,6 +68,31 @@ vpk pack -u Keincheck.Hub -v 0.11.0 -p publish -e Keincheck.Hub.exe --packTitle 
 That stops short of `vpk upload`, which is what the workflow does with its own token. Copying
 the shim into `publish/` is not optional — the hub's "Set up AI assistant" points the client at
 the co-located `keincheck-connect.exe`, and `e2e.yml` asserts it is there.
+
+### The three platform jobs
+
+`release.yml` runs `windows` → `linux` → `macos` (arm64, then x64) → `notes`, **in sequence**.
+They all upload into one GitHub release; Windows creates it and the rest pass `--merge`. Run in
+parallel, two jobs race to create the same release and one loses with a 422.
+
+Each platform gets its own Velopack **channel**, which is what keeps the update feeds apart —
+a Linux install must never be offered a `win-x64` package. Windows keeps Velopack's default
+channel (`win`); renaming it would orphan every existing install's update feed.
+
+Two things about those jobs are load-bearing and non-obvious:
+
+- **The macOS job must run on a macOS runner**, and not because `vpk` needs one. Apple Silicon
+  refuses to execute an arm64 binary with *no* signature at all, and the ad-hoc signature that
+  satisfies it is applied by the .NET SDK only when the publish itself runs on macOS. A
+  cross-published `osx-arm64` build is an app that cannot start.
+- **The Linux job installs `clang` and `zlib1g-dev`** before publishing the shim. Native AOT
+  shells out to clang and links zlib; without them the publish fails with a link error that
+  names neither package.
+
+The macOS builds are ad-hoc signed but **not notarized** — that needs a paid Apple Developer
+ID. They run; the first launch shows Gatekeeper's "cannot be opened…" dialog, which the user
+clears once via System Settings → Privacy & Security → Open Anyway. If a Developer ID is ever
+bought, `vpk pack` grows `--signAppIdentity` / `--notaryProfile` and the dialog goes away.
 
 ## What the E2E job actually does
 

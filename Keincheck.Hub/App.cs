@@ -43,17 +43,33 @@ public sealed class App : Application
             _window = new HubWindow(_vm);
             _window.Closing += (_, e) =>
             {
-                // Hide instead of close so the daemon keeps running in the tray.
+                // With a tray to fall back to, hide instead of close so the daemon keeps
+                // running. Without one the window is the ONLY handle on this process, so
+                // closing it has to mean "quit" — otherwise the user is left with a hub they
+                // can neither see nor stop. See HubSettings.StartInTrayOnly.
+                if (!_settings.StartInTrayOnly)
+                {
+                    desktop.Shutdown();
+                    return;
+                }
                 e.Cancel = true;
                 _window!.Hide();
             };
 
             BuildTray(desktop);
 
-            // Start TRAY-ONLY: the hub is a background daemon, so it must not pop a window on
-            // launch. The window is created but stays hidden until the user opens it from the
-            // tray (we deliberately do NOT set desktop.MainWindow, which would auto-show it;
-            // ShutdownMode.OnExplicitShutdown keeps the app alive with no window open).
+            // Tray-only where a tray is guaranteed (Windows, macOS): the hub is a background
+            // daemon and must not pop a window on launch. The window is created but stays
+            // hidden until the user opens it from the tray (we deliberately do NOT set
+            // desktop.MainWindow, which would auto-show it; ShutdownMode.OnExplicitShutdown
+            // keeps the app alive with no window open).
+            //
+            // On Linux there is no guaranteed tray — a stock GNOME session has no
+            // StatusNotifierItem host — so the window is shown instead, and the user opts in
+            // to tray-only from the tray menu once they can see their tray icon works.
+            if (!_settings.StartInTrayOnly)
+                Dispatcher.UIThread.Post(ShowWindow, DispatcherPriority.Background);
+
             desktop.Exit += (_, _) =>
             {
                 _tray?.Dispose();
@@ -77,6 +93,7 @@ public sealed class App : Application
         menu.Add(new NativeMenuItemSeparator());
         menu.Add(BuildAgentSetupMenu());
         menu.Add(BuildStartAtLoginItem());
+        menu.Add(BuildStartInTrayItem());
 
         // Only offered when this hub was built with remote support. Opening the panel does
         // not enable anything; it is where an operator turns the listener on and issues the
@@ -186,14 +203,36 @@ public sealed class App : Application
         return item;
     }
 
+    /// <summary>
+    /// Toggles whether the hub launches with no window (a pure tray daemon). Reachable from
+    /// the tray, so a user only ever sees it once they have proved their tray works — which
+    /// is exactly the precondition for turning it on. Takes effect on the next launch.
+    /// </summary>
+    private NativeMenuItem BuildStartInTrayItem()
+    {
+        var item = new NativeMenuItem("Start hidden in tray")
+        {
+            ToggleType = MenuItemToggleType.CheckBox,
+            IsChecked = _settings.StartInTrayOnly,
+        };
+        item.Click += (_, _) =>
+        {
+            var enable = !_settings.StartInTrayOnly;
+            _settings.SetStartInTrayOnly(enable);
+            item.IsChecked = enable;
+        };
+        return item;
+    }
+
     private void SetupAgents(params AgentTarget[] targets)
     {
         var connectExe = AgentMcpSetup.ResolveConnectExe();
         if (connectExe is null)
         {
             AgentSetupUi.ShowNote("Keincheck",
-                "Could not locate keincheck-connect.exe. Set the KEINCHECK_CONNECT_EXE environment " +
-                "variable to its full path, or reinstall the hub so the bridge is co-located.");
+                "Could not locate the keincheck-connect bridge. Set the KEINCHECK_CONNECT_EXE " +
+                "environment variable to its full path, or reinstall the hub so the bridge is " +
+                "co-located.");
             return;
         }
         AgentSetupUi.RunAndShowResult(targets, connectExe);
@@ -248,17 +287,28 @@ public sealed class App : Application
 
     private static WindowIcon? LoadTrayIcon()
     {
-        // Prefer an embedded asset; fall back to null (Avalonia draws a default badge).
-        try
+        // .ico is the Windows shell's format; the DBus StatusNotifierItem (Linux) and
+        // NSStatusItem (macOS) hosts both want a plain bitmap, so PNG leads off-Windows.
+        // Either candidate is tried in turn, and a total miss falls back to null (Avalonia
+        // draws a default badge) rather than leaving the hub with no tray icon at all.
+        var candidates = OperatingSystem.IsWindows()
+            ? new[] { "tray.ico", "tray.png" }
+            : new[] { "tray.png", "tray.ico" };
+
+        foreach (var name in candidates)
         {
-            var uri = new Uri("avares://Keincheck.Hub/Assets/tray.ico");
-            if (AssetLoader.Exists(uri))
-                using (var stream = AssetLoader.Open(uri))
-                    return new WindowIcon(stream);
-        }
-        catch
-        {
-            // No asset available — run without a custom tray glyph.
+            try
+            {
+                var uri = new Uri($"avares://Keincheck.Hub/Assets/{name}");
+                if (!AssetLoader.Exists(uri))
+                    continue;
+                using var stream = AssetLoader.Open(uri);
+                return new WindowIcon(stream);
+            }
+            catch
+            {
+                // Unreadable or undecodable on this platform — try the next candidate.
+            }
         }
         return null;
     }

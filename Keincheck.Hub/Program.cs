@@ -26,12 +26,30 @@ public static class Program
             return Remote.CredentialCli.Run(args);
 
         // Single-instance election: hold the per-user mutex for the hub's lifetime.
-        using var mutex = new Mutex(initiallyOwned: true, PipeNames.SingleInstanceMutex, out var isFirst);
-        if (!isFirst)
+        //
+        // The mutex is the FAST answer, not the authoritative one — the control pipe is, since
+        // two hubs cannot bind the same pipe name. So a platform that cannot give us a named
+        // mutex at all must not stop the daemon from starting: we fall through, and a genuine
+        // second instance still loses at the pipe. (Named mutexes are supported on Linux and
+        // macOS, where .NET backs them with shared memory under the temp dir; this is a guard
+        // against the daemon being unable to launch, not an expected path.)
+        Mutex? mutex = null;
+        try
         {
-            Console.Error.WriteLine("Keincheck hub is already running for this user.");
-            return 0;
+            mutex = new Mutex(initiallyOwned: true, PipeNames.SingleInstanceMutex, out var isFirst);
+            if (!isFirst)
+            {
+                Console.Error.WriteLine("Keincheck hub is already running for this user.");
+                return 0;
+            }
         }
+        catch (Exception ex) when (ex is PlatformNotSupportedException or NotSupportedException or IOException)
+        {
+            Console.Error.WriteLine(
+                $"[keincheck-hub] No named mutex on this platform ({ex.GetType().Name}); " +
+                "relying on the control pipe for single-instance.");
+        }
+        using var _ = mutex;
 
         // Best-effort: register to start at login so the hub is up when the AI connects —
         // unless the user opted out, in which case remove any registration an older version

@@ -44,7 +44,8 @@ Two deployment models share one introspection engine:
 ## Quick start — broker
 
 1. **Install the Hub** from the [latest release](https://github.com/DVSProductions/Keincheck/releases)
-   (a self-updating [Velopack](https://velopack.io) app).
+   (a self-updating [Velopack](https://velopack.io) app) — see [Platforms](#platforms) for
+   which asset to grab.
 2. **Add the client** to your Avalonia app and give it a stable id:
    ```csharp
    using Keincheck.Avalonia;   // Avalonia adapter package — supplies UseMcpClient
@@ -373,6 +374,72 @@ changes required.
 Libraries target **net8.0** for broad compatibility; the desktop/test apps target
 **net10.0** with `<RollForward>Major</RollForward>`. Design notes live in [`docs/`](https://github.com/DVSProductions/Keincheck/tree/main/docs).
 
+## Platforms
+
+The hub ships for all three desktop platforms. Everything below the hub — the pipe
+transport, the engine, the Avalonia adapter, the remote listener — is portable; only the
+**WPF** adapter is Windows-bound, because WPF is.
+
+| | Hub | Release asset | Notes |
+|---|---|---|---|
+| **Windows** x64 | ✅ | `…-win-Setup.exe` | Starts at login via the per-user `Run` key |
+| **Linux** x64 | ✅ | `…-linux-*.AppImage` | `chmod +x` and run. Autostart via an XDG `.desktop` entry |
+| **macOS** arm64 / x64 | ✅ | `…-osx-arm64-*` / `…-osx-x64-*` | Ad-hoc signed, **not notarized** — see below. Autostart via a `LaunchAgent` |
+
+### Package support
+
+The hub is a desktop app, but the *packages* reach further. `net8.0` throughout, so what
+limits a package is the APIs it uses, not its target framework:
+
+| Package | Win | Linux | macOS | Android | iOS / MacCatalyst | Browser |
+|---|---|---|---|---|---|---|
+| `Keincheck.Core` | yes | yes | yes | yes | yes | yes |
+| `Keincheck.Avalonia` | yes | yes | yes | yes | yes | yes |
+| `Keincheck.Remote` | yes | yes | yes | yes | yes | no |
+| `Keincheck.Protocol` | yes | yes | yes | partial | partial | no |
+| `Keincheck.Client` | yes | yes | yes | partial | partial | no |
+| `Keincheck` (embedded) | yes | yes | yes | no | no | no |
+| `Keincheck.Wpf` | yes | no | no | no | no | no |
+
+* **Core** and **Avalonia** use no platform-specific API at all.
+* **Remote** is portable everywhere there are sockets. Its PKCS#12 storage flags are chosen
+  per platform — Apple's mobile-derived targets reject `Exportable`, Windows SChannel requires
+  `UserKeySet` — see `RemoteCertificates.LoadFlagsFor`. Browser WASM has no sockets.
+* **Protocol** / **Client** are `partial` on mobile only because they are named-pipe based;
+  .NET maps those onto Unix domain sockets, which app sandboxes make awkward.
+* **Embedded** hosts Kestrel (`FrameworkReference Microsoft.AspNetCore.App`), so it is
+  desktop/server only.
+* **Wpf** is Windows-only because WPF is.
+
+One caveat that is not a portability limit but is worth knowing: on Unix there is no way to
+restrict access to a named mutex, so on a shared machine another local user can hold the hub's
+single-instance mutex and make it decline to start. That is denial of service only — the
+control pipe stays `CurrentUserOnly`, so no data is reachable.
+
+**macOS first launch.** The builds are ad-hoc signed (which is what Apple Silicon requires to
+run at all) but not notarized, which needs a paid Apple Developer ID. macOS therefore blocks
+the first launch with *"cannot be opened because Apple cannot check it for malicious
+software"*. Clear it once via **System Settings → Privacy & Security → Open Anyway**. Nothing
+else about the app is different.
+
+**Linux runtime dependencies.** A self-contained publish carries the .NET runtime but *not*
+system libraries. Avalonia's X11 backend dlopens the X11 session-management libs during
+startup, so a machine without them dies at launch with
+`DllNotFoundException: Unable to load shared library 'libICE.so.6'`. Every real desktop
+environment already pulls these in; minimal images, containers and WSL often do not:
+
+```sh
+sudo apt-get install libice6 libsm6 libx11-6 libxext6 libxrandr2 libxi6 libxcursor1 libfontconfig1
+# Fedora/RHEL: sudo dnf install libICE libSM libX11 libXext libXrandr libXi libXcursor fontconfig
+```
+
+**Linux and the system tray.** The hub is a tray daemon, and Linux is the one platform with no
+guaranteed tray — a stock GNOME session has no StatusNotifierItem host, so a tray-only hub
+there would be a process you can neither open nor quit. The hub therefore **starts with its
+window open on Linux**, and closing that window quits it. If your desktop does have a working
+tray (KDE, XFCE, Cinnamon, MATE, or GNOME with the AppIndicator extension), tick
+**Start hidden in tray** in the tray menu and it behaves like the Windows/macOS builds.
+
 ## Build & test
 
 ```sh
@@ -380,7 +447,16 @@ dotnet build Keincheck.sln
 dotnet test  Keincheck.sln
 ```
 
-Every push and pull request builds the solution and runs the unit suite, plus an end-to-end job
+On Linux and macOS, build the solution *filter* instead — it is the same solution minus
+`Keincheck.Wpf` and `samples/Keincheck.Wpf.Demo`, the only two `net8.0-windows` projects:
+
+```sh
+dotnet build Keincheck.CrossPlatform.slnf
+dotnet test  Keincheck.CrossPlatform.slnf
+```
+
+Every push and pull request builds the solution and runs the unit suite — on Windows for the
+full solution, and on Linux + macOS for the filter — plus an end-to-end job
 that installs the hub from a real Velopack installer and drives it through
 `keincheck-connect.exe`. The end-to-end suite is **opt-in** — it drives a real hub, so it skips
 unless `KEINCHECK_E2E=1` and refuses to start if a hub is already running.

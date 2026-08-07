@@ -32,6 +32,22 @@ public sealed class HubSettings
     public bool StartAtLogin { get; private set; } = true;
 
     /// <summary>
+    /// Whether the hub starts as a pure tray daemon (no window) rather than opening its
+    /// window on launch.
+    /// </summary>
+    /// <remarks>
+    /// Defaults to <c>true</c> on Windows and macOS, which both guarantee a system tray, and
+    /// to <c>false</c> on Linux, which does not: a bare GNOME session has no StatusNotifierItem
+    /// host, so a tray-only hub there is an invisible process the user can neither open nor
+    /// quit. Linux users running a desktop with a working tray (KDE, XFCE, Cinnamon, MATE, or
+    /// GNOME with the AppIndicator extension) can turn this on from the tray menu.
+    /// </remarks>
+    public bool StartInTrayOnly { get; private set; } = DefaultTrayOnly;
+
+    /// <summary>The platform's default for <see cref="StartInTrayOnly"/>. See that property.</summary>
+    public static bool DefaultTrayOnly => !OperatingSystem.IsLinux();
+
+    /// <summary>
     /// Opens (and eagerly loads) the settings under
     /// <c>%APPDATA%/Keincheck/hub-settings.json</c>, or a custom path for tests.
     /// </summary>
@@ -63,6 +79,18 @@ public sealed class HubSettings
         }
     }
 
+    /// <summary>Sets <see cref="StartInTrayOnly"/> and persists immediately (best-effort).</summary>
+    public void SetStartInTrayOnly(bool value)
+    {
+        lock (_gate)
+        {
+            if (StartInTrayOnly == value)
+                return;
+            StartInTrayOnly = value;
+            Save();
+        }
+    }
+
     private void Load()
     {
         try
@@ -70,9 +98,14 @@ public sealed class HubSettings
             if (!File.Exists(_path))
                 return;
 
+            // A property missing from an older settings file keeps the DTO's initializer
+            // value, so adding a setting never rewrites an existing user's other choices.
             var dto = JsonSerializer.Deserialize<Dto>(File.ReadAllText(_path));
             if (dto is not null)
+            {
                 StartAtLogin = dto.StartAtLogin;
+                StartInTrayOnly = dto.StartInTrayOnly;
+            }
         }
         catch
         {
@@ -85,7 +118,8 @@ public sealed class HubSettings
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
-            File.WriteAllText(_path, JsonSerializer.Serialize(new Dto { StartAtLogin = StartAtLogin }, s_json));
+            var dto = new Dto { StartAtLogin = StartAtLogin, StartInTrayOnly = StartInTrayOnly };
+            File.WriteAllText(_path, JsonSerializer.Serialize(dto, s_json));
         }
         catch
         {
@@ -96,5 +130,6 @@ public sealed class HubSettings
     private sealed class Dto
     {
         public bool StartAtLogin { get; set; } = true;
+        public bool StartInTrayOnly { get; set; } = DefaultTrayOnly;
     }
 }

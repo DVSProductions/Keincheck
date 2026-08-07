@@ -209,6 +209,12 @@ public static class Program
         {
             // Name not found => no hub.
         }
+        catch (Exception ex) when (ex is PlatformNotSupportedException or NotSupportedException or IOException)
+        {
+            // No named mutex on this platform. "No hub" is the safe answer: the shim then
+            // launches one, and a hub that is already up exits on its own election. Guessing
+            // the other way would leave the shim waiting on a pipe nobody is serving.
+        }
         return false;
     }
 

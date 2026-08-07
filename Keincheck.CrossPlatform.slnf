@@ -1,0 +1,21 @@
+{
+  "solution": {
+    "path": "Keincheck.sln",
+    "projects": [
+      "Keincheck.Avalonia\\Keincheck.Avalonia.csproj",
+      "Keincheck.Client\\Keincheck.Client.csproj",
+      "Keincheck.Connect\\Keincheck.Connect.csproj",
+      "Keincheck.Core\\Keincheck.Core.csproj",
+      "Keincheck.Hub\\Keincheck.Hub.csproj",
+      "Keincheck.Protocol\\Keincheck.Protocol.csproj",
+      "Keincheck.Remote\\Keincheck.Remote.csproj",
+      "Keincheck\\Keincheck.csproj",
+      "samples\\Keincheck.Demo\\Keincheck.Demo.csproj",
+      "tests\\Keincheck.Broker.Tests\\Keincheck.Broker.Tests.csproj",
+      "tests\\Keincheck.E2E\\Keincheck.E2E.csproj",
+      "tests\\Keincheck.Protocol.Tests\\Keincheck.Protocol.Tests.csproj",
+      "tests\\Keincheck.Remote.Tests\\Keincheck.Remote.Tests.csproj",
+      "tests\\Keincheck.Tests\\Keincheck.Tests.csproj"
+    ]
+  }
+}

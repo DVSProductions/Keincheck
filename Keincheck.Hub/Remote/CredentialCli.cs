@@ -193,6 +193,12 @@ internal static class CredentialCli
             // It exists but belongs to another user's session; we cannot use its pipe either.
             return false;
         }
+        catch (Exception ex) when (ex is PlatformNotSupportedException or NotSupportedException or IOException)
+        {
+            // No named mutex on this platform. Report "no hub": issuing then goes through the
+            // in-process store instead of the pipe, which is the working path either way.
+            return false;
+        }
     }
 
     private sealed class CredentialRefusedException(string message, bool unavailable) : Exception(message)
@@ -216,6 +222,11 @@ internal static class CredentialCli
     /// </remarks>
     private static void AttachToParentConsole()
     {
+        // Windows-only by construction: elsewhere the process already inherits the launching
+        // terminal's stdout/stderr, so there is nothing to attach to (and kernel32 is absent).
+        if (!OperatingSystem.IsWindows())
+            return;
+
         try { AttachConsole(-1); } catch { /* no parent console; redirected output still works */ }
     }
 
