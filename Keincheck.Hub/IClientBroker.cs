@@ -222,6 +222,13 @@ public enum ClientTransport
 
     /// <summary>Reserved for a future dial-out rendezvous. Not implemented.</summary>
     Relay = 2,
+
+    /// <summary>
+    /// A WebSocket on the hub's loopback HTTP endpoint — the transport for apps that have no
+    /// named pipes, which in practice means a browser. Authenticated by a hub-issued token and
+    /// an origin allowlist rather than by an OS ACL or a client certificate.
+    /// </summary>
+    WebSocket = 3,
 }
 
 /// <summary>
@@ -238,6 +245,23 @@ public sealed record ClientSessionContext
 {
     /// <summary>The local-pipe context: same machine, launchable, not read-only by default.</summary>
     public static readonly ClientSessionContext LocalPipe = new() { Transport = ClientTransport.Pipe };
+
+    /// <summary>
+    /// A session accepted on the loopback WebSocket endpoint.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="CanLaunch"/> is false: the peer is a page in a browser the hub did not start
+    /// and cannot restart. <see cref="Host"/> stays null — unlike a TLS session there is no
+    /// validated certificate to read a machine identity off, and the token says only that the
+    /// operator issued it, not who is holding it.
+    /// </remarks>
+    public static ClientSessionContext ForWebSocket(string? peerAddress, string? origin) => new()
+    {
+        Transport = ClientTransport.WebSocket,
+        PeerAddress = peerAddress,
+        MachineId = origin,
+        CanLaunch = false,
+    };
 
     /// <summary>How this client is attached.</summary>
     public required ClientTransport Transport { get; init; }

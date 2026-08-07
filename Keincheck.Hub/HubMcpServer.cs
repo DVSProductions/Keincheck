@@ -2,6 +2,7 @@ using System.Text.Json;
 using Keincheck.Protocol;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -41,6 +42,12 @@ public sealed class HubMcpServer : IAsyncDisposable
 
     /// <summary>Who is currently allowed to drive each app instance.</summary>
     public ClientClaimRegistry Claims => _claims;
+
+    /// <summary>
+    /// The gate in front of the client-attach WebSocket endpoint. Off until an operator enables
+    /// it and approves an origin, so merely having this property changes nothing.
+    /// </summary>
+    public HubWebSocketAccess WebSocketAccess { get; } = HubWebSocketAccess.Open();
 
     // The live agent sessions, keyed by their STABLE server (the one notifications go to).
     // Each session is added once at the transport boundary (see RegisterSession) and removed
@@ -305,7 +312,81 @@ public sealed class HubMcpServer : IAsyncDisposable
 
         _web = builder.Build();
         _web.MapMcp();
+        MapWebSocketAttach(_web);
         _web.Start();
+    }
+
+    /// <summary>
+    /// The client-attach WebSocket endpoint, on the same loopback Kestrel as the MCP endpoint.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is how an app with no named pipes reaches the hub — a browser-hosted Avalonia app,
+    /// in practice. Above the socket nothing is new: the session becomes a
+    /// <see cref="PipeChannel"/> over a <see cref="WebSocketStream"/> and goes into the same
+    /// <c>AcceptChannel</c> the pipe listener and the TLS listener use.
+    /// </para>
+    /// <para>
+    /// The route is always mapped; <see cref="HubWebSocketAccess"/> decides whether it answers.
+    /// Mapping it conditionally would mean the hub had to restart to turn the feature on, and
+    /// a disabled gate answers 404 anyway — indistinguishable from an unmapped route.
+    /// </para>
+    /// </remarks>
+    private void MapWebSocketAttach(WebApplication app)
+    {
+        // Only the live broker can serve sessions; a stub broker (tests, design-time) has
+        // nothing to attach to, so the route stays unmapped rather than accepting and hanging.
+        if (_broker is not PipeClientBroker broker)
+            return;
+
+        app.UseWebSockets();
+
+        app.Map(_options.WebSocketPath, async context =>
+        {
+            if (!context.WebSockets.IsWebSocketRequest)
+            {
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return;
+            }
+
+            // Absent Origin means "not a browser", which the gate treats as still needing a
+            // token — it is not a way to skip the check.
+            var origin = context.Request.Headers.Origin.ToString();
+            origin = string.IsNullOrEmpty(origin) ? null : origin;
+            var token = context.Request.Query[WebSocketEndpoint.TokenQueryParameter].ToString();
+
+            var verdict = WebSocketAccess.Check(origin, token);
+            if (verdict != WebSocketGateResult.Allowed)
+            {
+                // 404 for a disabled endpoint so a probe cannot tell the feature exists;
+                // 403/401 once it is on, because by then the operator wants to see why their
+                // own app was turned away.
+                context.Response.StatusCode = verdict switch
+                {
+                    WebSocketGateResult.Disabled => StatusCodes.Status404NotFound,
+                    WebSocketGateResult.OriginNotAllowed => StatusCodes.Status403Forbidden,
+                    _ => StatusCodes.Status401Unauthorized,
+                };
+                return;
+            }
+
+            using var socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
+
+            // ownsSocket: false — ASP.NET Core owns the socket for the request's lifetime, and
+            // disposing it from under the framework closes the response mid-flight.
+            var stream = new WebSocketStream(socket, ownsSocket: false);
+
+            // Default limits, as the pipe uses. The TLS listener starts at ChannelLimits.Handshake
+            // because it reads frames from a peer it has not authorized yet; here the token was
+            // checked before the upgrade, so the first frame already comes from an allowed peer.
+            using var channel = new PipeChannel(stream, ownsStream: true);
+
+            await broker.AcceptChannel(
+                channel,
+                ClientSessionContext.ForWebSocket(
+                    context.Connection.RemoteIpAddress?.ToString(), origin),
+                context.RequestAborted).ConfigureAwait(false);
+        });
     }
 
     private void ConfigureServerOptions(ModelContextProtocol.Server.McpServerOptions o)

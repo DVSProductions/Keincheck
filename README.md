@@ -396,8 +396,8 @@ limits a package is the APIs it uses, not its target framework:
 | `Keincheck.Core` | yes | yes | yes | yes | yes | yes |
 | `Keincheck.Avalonia` | yes | yes | yes | yes | yes | yes |
 | `Keincheck.Remote` | yes | yes | yes | yes | yes | no |
-| `Keincheck.Protocol` | yes | yes | yes | partial | partial | no |
-| `Keincheck.Client` | yes | yes | yes | partial | partial | no |
+| `Keincheck.Protocol` | yes | yes | yes | partial | partial | WebSocket |
+| `Keincheck.Client` | yes | yes | yes | partial | partial | WebSocket |
 | `Keincheck` (embedded) | yes | yes | yes | no | no | no |
 | `Keincheck.Wpf` | yes | no | no | no | no | no |
 
@@ -406,10 +406,52 @@ limits a package is the APIs it uses, not its target framework:
   per platform — Apple's mobile-derived targets reject `Exportable`, Windows SChannel requires
   `UserKeySet` — see `RemoteCertificates.LoadFlagsFor`. Browser WASM has no sockets.
 * **Protocol** / **Client** are `partial` on mobile only because they are named-pipe based;
-  .NET maps those onto Unix domain sockets, which app sandboxes make awkward.
+  .NET maps those onto Unix domain sockets, which app sandboxes make awkward. In the browser
+  there are no pipes at all, so they reach the hub over a WebSocket instead — see below.
 * **Embedded** hosts Kestrel (`FrameworkReference Microsoft.AspNetCore.App`), so it is
   desktop/server only.
 * **Wpf** is Windows-only because WPF is.
+
+### Browser apps (WebSocket transport)
+
+A browser has no named pipes, no sockets, no `SslStream` and no `X509Certificate2`, so neither
+the pipe connector nor `Keincheck.Remote` can reach the hub from WebAssembly. What it does have
+is the browser's own WebSocket API. Point the client at it:
+
+```csharp
+using Keincheck.Avalonia;
+using Keincheck.Client;
+
+AppBuilder.Configure<App>()
+    .UseMcpClient(o =>
+    {
+        o.AppId = "myapp";
+        o.Connector = new WebSocketChannelConnector(
+            new Uri("ws://127.0.0.1:3100/ws"), token: "<issued by the hub>");
+    });
+```
+
+Everything above the socket is unchanged — the session is the same `PipeChannel`, the same
+framing, the same register handshake. Only the bytes travel differently.
+
+**This is not `Keincheck.Remote`'s security model, and must not be mistaken for it.** There is
+no mutual TLS: a browser cannot present a client certificate or pin a private CA. Instead the
+hub gates the endpoint on two things, both required:
+
+| Check | Stops |
+|---|---|
+| A hub-issued **token** | Any other local process. A loopback TCP port has no `CurrentUserOnly` equivalent |
+| An **origin allowlist** | Any web page you happen to visit. The same-origin policy does not apply to WebSockets, so a page on another site can open `ws://127.0.0.1` — but the browser sets `Origin`, and page script cannot forge it |
+
+The endpoint is **off until you turn it on**, and answers `404` until then, so a hub whose owner
+never enabled it is indistinguishable from one that has no such feature.
+
+Confidentiality comes from underneath: loopback (bytes never leave the machine) or `wss://`
+with a certificate the browser already trusts. The connector **refuses** plaintext `ws://` to
+any non-loopback host rather than sending your UI tree and screenshots in the clear.
+
+For a browser on a *different* machine, put a relay in front: browser → `wss://` → relay →
+existing mutual TLS → hub. The client code above does not change; only what terminates it does.
 
 One caveat that is not a portability limit but is worth knowing: on Unix there is no way to
 restrict access to a named mutex, so on a shared machine another local user can hold the hub's
