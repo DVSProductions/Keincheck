@@ -113,6 +113,12 @@ public sealed class HubWebSocketAccess
     {
         lock (_gate)
         {
+            // Pick up a policy written by another process since the last check. The build-time
+            // `--issue-websocket-token` command runs as its own process and writes this file, so
+            // without this a freshly enrolled app could not connect until the hub was restarted
+            // -- which would make the whole build-time flow useless.
+            ReloadIfChanged();
+
             if (!_enabled)
                 return WebSocketGateResult.Disabled;
 
@@ -228,12 +234,39 @@ public sealed class HubWebSocketAccess
 
     // ------------------------------------------------------------------ persistence
 
+    // The write time the in-memory policy was loaded from, so an external write can be noticed
+    // without re-reading and re-parsing the file on every single handshake.
+    private DateTime _loadedStamp;
+
+    /// <summary>Re-reads the policy if the file changed under us. Caller holds the lock.</summary>
+    private void ReloadIfChanged()
+    {
+        try
+        {
+            var stamp = File.Exists(_path) ? File.GetLastWriteTimeUtc(_path) : default;
+            if (stamp != _loadedStamp)
+                Load();
+        }
+        catch
+        {
+            // An unreadable timestamp is not a reason to refuse a request the in-memory policy
+            // already allows; the next change will be picked up.
+        }
+    }
+
     private void Load()
     {
         try
         {
+            _loadedStamp = File.Exists(_path) ? File.GetLastWriteTimeUtc(_path) : default;
+
             if (!File.Exists(_path))
+            {
+                _enabled = false;
+                _origins.Clear();
+                _tokens.Clear();
                 return;
+            }
 
             var dto = JsonSerializer.Deserialize<Dto>(File.ReadAllText(_path));
             if (dto is null)
@@ -267,6 +300,10 @@ public sealed class HubWebSocketAccess
                 Tokens = _tokens.ToList(),
             };
             File.WriteAllText(_path, JsonSerializer.Serialize(dto, s_json));
+
+            // Our own write must not read back as somebody else's, or the next Check would
+            // reload the file we just wrote and pointlessly re-parse it.
+            _loadedStamp = File.GetLastWriteTimeUtc(_path);
         }
         catch
         {

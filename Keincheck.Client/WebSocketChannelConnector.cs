@@ -76,6 +76,33 @@ public sealed class WebSocketChannelConnector : IChannelConnector
         _readTimeout = readTimeout ?? (IsLoopback(endpoint) ? null : TimeSpan.FromSeconds(30));
     }
 
+    /// <summary>
+    /// Builds a connector from a <see cref="WebSocketCredential"/>: the environment's, if one is
+    /// set, otherwise the one the build embedded in <paramref name="assembly"/>. Returns null
+    /// when there is neither, so an app can offer WebSocket attach without requiring it.
+    /// </summary>
+    /// <remarks>
+    /// The environment wins over the embedded credential on purpose, mirroring
+    /// <c>Keincheck.Remote</c>: it is what lets one build be pointed at a different hub without
+    /// recompiling, which is the difference between testing against a colleague's machine and
+    /// not being able to.
+    /// </remarks>
+    public static WebSocketChannelConnector? FromCredential(
+        System.Reflection.Assembly? assembly = null,
+        TimeSpan? connectTimeout = null,
+        TimeSpan? readTimeout = null)
+    {
+        var credential = WebSocketCredential.FromEnvironment()
+            ?? WebSocketCredential.FromAssembly(
+                assembly ?? System.Reflection.Assembly.GetEntryAssembly()
+                ?? System.Reflection.Assembly.GetCallingAssembly());
+
+        return credential is null
+            ? null
+            : new WebSocketChannelConnector(
+                new Uri(credential.Endpoint), credential.Token, connectTimeout, readTimeout);
+    }
+
     /// <inheritdoc/>
     public async Task<ChannelSession> ConnectAsync(
         ChannelConnectContext context, CancellationToken cancellationToken)

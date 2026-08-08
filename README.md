@@ -426,13 +426,34 @@ AppBuilder.Configure<App>()
     .UseMcpClient(o =>
     {
         o.AppId = "myapp";
-        o.Connector = new WebSocketChannelConnector(
-            new Uri("ws://127.0.0.1:3100/ws"), token: "<issued by the hub>");
+        o.Connector = WebSocketChannelConnector.FromCredential();
     });
 ```
 
 Everything above the socket is unchanged — the session is the same `PipeChannel`, the same
 framing, the same register handshake. Only the bytes travel differently.
+
+**Bound at build time.** `FromCredential()` reads a credential the build embedded, so the app
+attaches to the hub it was compiled against and no other. Opt in exactly as
+`Keincheck.Remote` does:
+
+```xml
+<PropertyGroup>
+  <KeincheckWebSocketEnroll>true</KeincheckWebSocketEnroll>
+  <KeincheckWebSocketOrigin>http://localhost:5000</KeincheckWebSocketOrigin>
+</PropertyGroup>
+```
+
+The build calls the installed hub, which allowlists that origin, mints a token, and returns a
+credential carrying the endpoint too — so nothing hardcodes the hub's port. `--if-missing` keeps
+it to one token rather than one per compile, and a hub that is already running picks the new
+token up without a restart.
+
+It is **off by default**, and the build will not enable the endpoint for you: if the gate is off
+the hub refuses and the build warns, because turning on a reachable endpoint is a decision you
+make once, deliberately. For CI, point `KeincheckWebSocketCredentialFile` at a credential you
+issued yourself and the build contacts nobody. `KEINCHECK_WEBSOCKET` overrides an embedded
+credential at run time, which is how one build gets aimed at a different hub without recompiling.
 
 **This is not `Keincheck.Remote`'s security model, and must not be mistaken for it.** There is
 no mutual TLS: a browser cannot present a client certificate or pin a private CA. Instead the
@@ -445,6 +466,14 @@ hub gates the endpoint on two things, both required:
 
 The endpoint is **off until you turn it on**, and answers `404` until then, so a hub whose owner
 never enabled it is indistinguishable from one that has no such feature.
+
+**An embedded token is not a secret in a browser.** WebAssembly assemblies are downloaded to
+every visitor, so anyone who can load the page can read the token out — unlike a desktop app's
+embedded credential, which at least sits on the user's own machine. For an app served from
+localhost during development that costs nothing. For a publicly deployed site, assume the token
+is public: the origin allowlist is what still protects you, since a page on another site cannot
+satisfy it. What you lose is the token's protection against *other local users* on a shared
+machine, whom the named pipe's `CurrentUserOnly` would have excluded.
 
 Confidentiality comes from underneath: loopback (bytes never leave the machine) or `wss://`
 with a certificate the browser already trusts. The connector **refuses** plaintext `ws://` to

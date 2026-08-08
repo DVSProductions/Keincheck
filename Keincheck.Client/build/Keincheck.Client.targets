@@ -1,0 +1,123 @@
+<Project>
+
+  <!--
+    Build-time WebSocket enrollment for Keincheck.Client.
+
+    Binds an app to ONE hub at compile time: the build asks the installed hub to allowlist the
+    app's origin and mint a token, and embeds the resulting credential. The app then attaches
+    with WebSocketChannelConnector.FromCredential() and reaches that hub and no other.
+
+    This exists for the browser. A WebAssembly app has no named pipes, so it cannot use the
+    default transport, and it has no X509Certificate2, so it cannot use Keincheck.Remote either.
+
+    There are three ways to give an app a credential, ordered so they compose rather than compete
+    -- the same ordering Keincheck.Remote.targets uses, for the same reasons:
+
+      1. Supply one at runtime. Nothing here is involved: set KEINCHECK_WEBSOCKET (the
+         credential) or KEINCHECK_WEBSOCKET_FILE (a path to it) on the machine that runs the
+         app, and FromCredential() picks it up. It also OVERRIDES an embedded credential, which
+         is how one build gets pointed at a different hub without recompiling.
+
+      2. Let the build ask. Set KeincheckWebSocketEnroll=true and KeincheckWebSocketOrigin to the
+         URL the app is served from; the build calls the installed hub to mint a token and embeds
+         it. Convenient on a developer machine; needs a hub with the WebSocket endpoint enabled.
+
+      3. Supply one and point the build at it, for CI. Set KeincheckWebSocketCredentialFile and
+         the build embeds THAT, contacting nobody.
+
+    Option 3 always wins over option 2: if you supplied a credential, the build must never
+    quietly mint a different one.
+
+    OFF by default. Every build phoning a hub would be surprising, would fill the hub's token
+    list, and would fail on any machine without one.
+
+    SECURITY. A browser downloads its assemblies to every visitor, so an embedded token is
+    readable by anyone who can load the page -- it is not a secret the way a desktop app's
+    embedded credential is. That is fine for an app served from localhost during development. For
+    a publicly deployed site, assume the token is public: what still protects the hub is the
+    origin allowlist, which a page on another site cannot satisfy.
+  -->
+
+  <PropertyGroup>
+    <KeincheckWebSocketEnroll Condition="'$(KeincheckWebSocketEnroll)' == ''">false</KeincheckWebSocketEnroll>
+    <KeincheckWebSocketEmbedCredential Condition="'$(KeincheckWebSocketEmbedCredential)' == ''">true</KeincheckWebSocketEmbedCredential>
+  </PropertyGroup>
+
+  <Target Name="KeincheckResolveWebSocketCredential"
+          BeforeTargets="BeforeCompile"
+          Condition="'$(KeincheckWebSocketEnroll)' == 'true' or '$(KeincheckWebSocketCredentialFile)' != ''">
+
+    <!--
+      Resolved INSIDE the target and made absolute: $(IntermediateOutputPath) is not set when
+      this file is evaluated, so defaulting it in the PropertyGroup above would write the
+      credential to the PROJECT ROOT -- a token in the source tree, ready to be committed.
+    -->
+    <PropertyGroup>
+      <_KcWsSupplied Condition="'$(KeincheckWebSocketCredentialFile)' != ''">$(KeincheckWebSocketCredentialFile)</_KcWsSupplied>
+      <_KcWsSupplied Condition="'$(_KcWsSupplied)' == '' and '$(KEINCHECK_WEBSOCKET_FILE)' != ''">$(KEINCHECK_WEBSOCKET_FILE)</_KcWsSupplied>
+      <_KcWsMinted>$([System.IO.Path]::GetFullPath('$(ProjectDir)$(IntermediateOutputPath)keincheck-websocket.credential'))</_KcWsMinted>
+    </PropertyGroup>
+
+    <Error Condition="'$(_KcWsSupplied)' != '' and !Exists('$(_KcWsSupplied)')"
+           Text="Keincheck: the WebSocket credential file '$(_KcWsSupplied)' does not exist. Issue one with `Keincheck.Hub --issue-websocket-token`." />
+
+    <!-- Option 3: a credential was supplied. Use it and contact nothing. -->
+    <PropertyGroup Condition="'$(_KcWsSupplied)' != ''">
+      <_KcWsPath>$(_KcWsSupplied)</_KcWsPath>
+    </PropertyGroup>
+
+    <Error Condition="'$(_KcWsPath)' == '' and '$(KeincheckWebSocketEnroll)' == 'true' and '$(KeincheckWebSocketOrigin)' == ''"
+           Text="Keincheck: KeincheckWebSocketEnroll is true but KeincheckWebSocketOrigin is not set. Set it to the URL the app is served from, e.g. http://localhost:5000 -- the hub allowlists that origin, and a browser page from anywhere else is refused." />
+
+    <!--
+      Option 2: nothing supplied, so ask the installed hub. Inline rather than a CallTarget:
+      properties set by this target are not visible to one invoked through CallTarget.
+    -->
+    <PropertyGroup Condition="'$(_KcWsPath)' == '' and '$(KeincheckWebSocketEnroll)' == 'true'">
+      <_KcWsHubExe Condition="'$(KeincheckHubExe)' != ''">$(KeincheckHubExe)</_KcWsHubExe>
+      <_KcWsHubExe Condition="'$(_KcWsHubExe)' == '' and '$(KEINCHECK_HUB_EXE)' != ''">$(KEINCHECK_HUB_EXE)</_KcWsHubExe>
+      <_KcWsHubExe Condition="'$(_KcWsHubExe)' == '' and '$(OS)' == 'Windows_NT'">$(LOCALAPPDATA)\Keincheck.Hub\current\Keincheck.Hub.exe</_KcWsHubExe>
+      <_KcWsHubExe Condition="'$(_KcWsHubExe)' == ''">$(HOME)/.local/share/Keincheck.Hub/current/Keincheck.Hub</_KcWsHubExe>
+    </PropertyGroup>
+
+    <Warning Condition="'$(_KcWsPath)' == '' and '$(KeincheckWebSocketEnroll)' == 'true' and !Exists('$(_KcWsHubExe)')"
+             Text="Keincheck: no hub found at '$(_KcWsHubExe)', so no WebSocket token was issued. Set KeincheckHubExe or KEINCHECK_HUB_EXE, or supply one with KeincheckWebSocketCredentialFile. This build will not be able to attach from a browser." />
+
+    <!--
+      IgnoreExitCode with deliberately NO ContinueOnError: ContinueOnError makes MSBuild swallow
+      the task's outputs, so ExitCode comes back empty and the diagnostics below never fire --
+      a build with no hub would report success and silently produce nothing.
+    -->
+    <Exec Condition="'$(_KcWsPath)' == '' and '$(KeincheckWebSocketEnroll)' == 'true' and Exists('$(_KcWsHubExe)')"
+          Command="&quot;$(_KcWsHubExe)&quot; --issue-websocket-token --origin &quot;$(KeincheckWebSocketOrigin)&quot; --label &quot;$(MSBuildProjectName)&quot; --out &quot;$(_KcWsMinted)&quot; --if-missing"
+          IgnoreExitCode="true"
+          StandardOutputImportance="low"
+          StandardErrorImportance="normal">
+      <Output TaskParameter="ExitCode" PropertyName="_KcWsExit" />
+    </Exec>
+
+    <Warning Condition="'$(_KcWsExit)' == '4'"
+             Text="Keincheck: the hub's WebSocket endpoint is not enabled on this machine, so no token was issued. Enable it once from the hub window. This build will not be able to attach from a browser." />
+    <Warning Condition="'$(_KcWsExit)' != '' and '$(_KcWsExit)' != '0' and '$(_KcWsExit)' != '4'"
+             Text="Keincheck: the hub declined to issue a WebSocket token (exit $(_KcWsExit)). This build will not be able to attach from a browser." />
+
+    <PropertyGroup Condition="'$(_KcWsPath)' == '' and Exists('$(_KcWsMinted)')">
+      <_KcWsPath>$(_KcWsMinted)</_KcWsPath>
+    </PropertyGroup>
+  </Target>
+
+  <!--
+    Embed whichever credential was resolved. The app reads it back with
+    WebSocketCredential.FromAssembly over the "Keincheck.WebSocket.Credential" manifest resource.
+    Set KeincheckWebSocketEmbedCredential=false to resolve one without embedding it.
+  -->
+  <Target Name="KeincheckEmbedWebSocketCredential"
+          AfterTargets="KeincheckResolveWebSocketCredential"
+          Condition="'$(KeincheckWebSocketEmbedCredential)' == 'true' and '$(_KcWsPath)' != '' and Exists('$(_KcWsPath)')">
+    <ItemGroup>
+      <EmbeddedResource Include="$(_KcWsPath)" LogicalName="Keincheck.WebSocket.Credential" />
+    </ItemGroup>
+    <Message Importance="normal" Text="Keincheck: embedded a WebSocket credential from $(_KcWsPath)." />
+  </Target>
+
+</Project>

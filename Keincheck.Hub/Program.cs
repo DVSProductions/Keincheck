@@ -25,6 +25,11 @@ public static class Program
         if (args.Contains(Remote.CredentialCli.Verb, StringComparer.Ordinal))
             return Remote.CredentialCli.Run(args);
 
+        // Same shape, same reason: binding a browser app to this hub is a one-shot command a
+        // build step runs, not a hub run, and it must work while a hub is already up.
+        if (args.Contains(WebSocketTokenCli.Verb, StringComparer.Ordinal))
+            return WebSocketTokenCli.Run(args);
+
         // Single-instance election: hold the per-user mutex for the hub's lifetime.
         //
         // The mutex is the FAST answer, not the authoritative one — the control pipe is, since
