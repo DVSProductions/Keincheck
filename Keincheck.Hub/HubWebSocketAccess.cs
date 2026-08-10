@@ -154,17 +154,32 @@ public sealed class HubWebSocketAccess
 
     // ------------------------------------------------------------------ mutations
 
-    /// <summary>Turns the endpoint on or off and persists immediately (best-effort).</summary>
-    public void SetEnabled(bool value)
+    /// <summary>
+    /// Turns the endpoint on or off and persists immediately (best-effort).
+    /// </summary>
+    /// <param name="reason">
+    /// Who turned it on and why, recorded alongside the flag. A build can enable the endpoint
+    /// for a loopback origin, so the operator has to be able to find out that something did —
+    /// this hub surfaces what it did rather than doing it quietly.
+    /// </param>
+    public void SetEnabled(bool value, string? reason = null)
     {
         lock (_gate)
         {
-            if (_enabled == value)
+            if (_enabled == value && reason is null)
                 return;
             _enabled = value;
+            EnabledBy = value ? reason : null;
+            EnabledAt = value ? DateTimeOffset.UtcNow : null;
             Save();
         }
     }
+
+    /// <summary>Why the endpoint was last enabled, when something other than a human did it.</summary>
+    public string? EnabledBy { get; private set; }
+
+    /// <summary>When the endpoint was last enabled.</summary>
+    public DateTimeOffset? EnabledAt { get; private set; }
 
     /// <summary>
     /// Adds an origin to the allowlist. Stored as scheme://host[:port] exactly as a browser
@@ -273,6 +288,8 @@ public sealed class HubWebSocketAccess
                 return;
 
             _enabled = dto.Enabled;
+            EnabledBy = dto.EnabledBy;
+            EnabledAt = dto.EnabledAt;
             _origins.Clear();
             _origins.AddRange(dto.Origins ?? []);
             _tokens.Clear();
@@ -296,6 +313,8 @@ public sealed class HubWebSocketAccess
             var dto = new Dto
             {
                 Enabled = _enabled,
+                EnabledBy = EnabledBy,
+                EnabledAt = EnabledAt,
                 Origins = _origins.ToList(),
                 Tokens = _tokens.ToList(),
             };
@@ -320,6 +339,8 @@ public sealed class HubWebSocketAccess
     private sealed class Dto
     {
         public bool Enabled { get; set; }
+        public string? EnabledBy { get; set; }
+        public DateTimeOffset? EnabledAt { get; set; }
         public List<string>? Origins { get; set; }
         public List<TokenRecord>? Tokens { get; set; }
     }

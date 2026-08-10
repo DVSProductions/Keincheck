@@ -449,11 +449,24 @@ credential carrying the endpoint too — so nothing hardcodes the hub's port. `-
 it to one token rather than one per compile, and a hub that is already running picks the new
 token up without a restart.
 
-It is **off by default**, and the build will not enable the endpoint for you: if the gate is off
-the hub refuses and the build warns, because turning on a reachable endpoint is a decision you
-make once, deliberately. For CI, point `KeincheckWebSocketCredentialFile` at a credential you
-issued yourself and the build contacts nobody. `KEINCHECK_WEBSOCKET` overrides an embedded
-credential at run time, which is how one build gets aimed at a different hub without recompiling.
+**Zero-config for the dev loop.** The build declares itself a web-app build, and the hub decides
+what that earns. For a **loopback** origin it switches the endpoint on itself — the endpoint
+binds `127.0.0.1`, and enabling it grants nothing on its own, since the same command is what
+allowlists the origin and mints the token. The hub records what did it:
+
+```json
+"Enabled": true,
+"EnabledBy": "build: mywebapp (http://localhost:5000)",
+"EnabledAt": "2026-08-10T18:21:50Z"
+```
+
+For a **published** origin (`https://myapp.example`) it still refuses, and the build warns. That
+is the case where the embedded token stops being a secret, so opting into it stays something you
+do once, by hand. Set `KeincheckWebSocketAutoEnable=false` to require that for every origin.
+
+For CI, point `KeincheckWebSocketCredentialFile` at a credential you issued yourself and the
+build contacts nobody. `KEINCHECK_WEBSOCKET` overrides an embedded credential at run time, which
+is how one build gets aimed at a different hub without recompiling.
 
 **This is not `Keincheck.Remote`'s security model, and must not be mistaken for it.** There is
 no mutual TLS: a browser cannot present a client certificate or pin a private CA. Instead the
@@ -464,8 +477,9 @@ hub gates the endpoint on two things, both required:
 | A hub-issued **token** | Any other local process. A loopback TCP port has no `CurrentUserOnly` equivalent |
 | An **origin allowlist** | Any web page you happen to visit. The same-origin policy does not apply to WebSockets, so a page on another site can open `ws://127.0.0.1` — but the browser sets `Origin`, and page script cannot forge it |
 
-The endpoint is **off until you turn it on**, and answers `404` until then, so a hub whose owner
-never enabled it is indistinguishable from one that has no such feature.
+The endpoint answers `404` until something turns it on, so a hub that has never been asked for
+it is indistinguishable from one that has no such feature. A web-app build can turn it on for a
+loopback origin (see below); anything else takes a deliberate act.
 
 **An embedded token is not a secret in a browser.** WebAssembly assemblies are downloaded to
 every visitor, so anyone who can load the page can read the token out — unlike a desktop app's

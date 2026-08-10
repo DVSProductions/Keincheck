@@ -78,6 +78,14 @@
       <_KcWsHubExe Condition="'$(_KcWsHubExe)' == '' and '$(KEINCHECK_HUB_EXE)' != ''">$(KEINCHECK_HUB_EXE)</_KcWsHubExe>
       <_KcWsHubExe Condition="'$(_KcWsHubExe)' == '' and '$(OS)' == 'Windows_NT'">$(LOCALAPPDATA)\Keincheck.Hub\current\Keincheck.Hub.exe</_KcWsHubExe>
       <_KcWsHubExe Condition="'$(_KcWsHubExe)' == ''">$(HOME)/.local/share/Keincheck.Hub/current/Keincheck.Hub</_KcWsHubExe>
+
+      <!--
+        Declares "this is a web-app build" to the hub, which switches the endpoint on itself
+        when the origin is loopback. The hub, not the build, decides: a public origin is still
+        refused, because a published site's embedded token is readable by every visitor.
+        Set KeincheckWebSocketAutoEnable=false to always enable it by hand instead.
+      -->
+      <_KcWsEnableArg Condition="'$(KeincheckWebSocketAutoEnable)' != 'false'">--enable-if-needed</_KcWsEnableArg>
     </PropertyGroup>
 
     <Warning Condition="'$(_KcWsPath)' == '' and '$(KeincheckWebSocketEnroll)' == 'true' and !Exists('$(_KcWsHubExe)')"
@@ -89,7 +97,7 @@
       a build with no hub would report success and silently produce nothing.
     -->
     <Exec Condition="'$(_KcWsPath)' == '' and '$(KeincheckWebSocketEnroll)' == 'true' and Exists('$(_KcWsHubExe)')"
-          Command="&quot;$(_KcWsHubExe)&quot; --issue-websocket-token --origin &quot;$(KeincheckWebSocketOrigin)&quot; --label &quot;$(MSBuildProjectName)&quot; --out &quot;$(_KcWsMinted)&quot; --if-missing"
+          Command="&quot;$(_KcWsHubExe)&quot; --issue-websocket-token --origin &quot;$(KeincheckWebSocketOrigin)&quot; --label &quot;$(MSBuildProjectName)&quot; --out &quot;$(_KcWsMinted)&quot; --if-missing $(_KcWsEnableArg)"
           IgnoreExitCode="true"
           StandardOutputImportance="low"
           StandardErrorImportance="normal">

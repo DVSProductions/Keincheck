@@ -59,11 +59,34 @@ internal static class WebSocketTokenCli
 
         if (!access.Enabled)
         {
-            Console.Error.WriteLine(
-                "Keincheck: the WebSocket endpoint is not enabled on this machine, so no token was " +
-                "issued. Enable it once from the hub window. This build will not be able to attach " +
-                "from a browser.");
-            return Unavailable;
+            // The build declares "I am a web app" with --enable-if-needed, and the hub decides
+            // whether that is enough. For a LOOPBACK origin it is: the endpoint binds
+            // 127.0.0.1, and switching it on grants nothing by itself -- with no origin
+            // allowlisted and no token issued every request is still refused. Since this same
+            // command is about to do both of the things that DO grant access, refusing to flip
+            // a bit that grants none of it was ceremony rather than a control.
+            //
+            // A non-loopback origin is the case where the embedded token stops being a secret
+            // (a browser ships its assemblies to every visitor), so that stays a deliberate act.
+            if (options.EnableIfNeeded && IsLoopbackOrigin(options.Origin!))
+            {
+                access.SetEnabled(true, $"build: {options.Label} ({options.Origin})");
+                Console.Error.WriteLine(
+                    $"Keincheck: enabled the WebSocket endpoint for the loopback origin {options.Origin}. " +
+                    "Turn it off again from the hub window.");
+            }
+            else
+            {
+                Console.Error.WriteLine(options.EnableIfNeeded
+                    ? $"Keincheck: '{options.Origin}' is not a loopback origin, so the endpoint was " +
+                      "not enabled automatically. A published site's embedded token is readable by " +
+                      "anyone who loads the page, so enable it once from the hub window if that is " +
+                      "what you want. This build will not be able to attach from a browser."
+                    : "Keincheck: the WebSocket endpoint is not enabled on this machine, so no token " +
+                      "was issued. Enable it once from the hub window. This build will not be able " +
+                      "to attach from a browser.");
+                return Unavailable;
+            }
         }
 
         if (!access.AllowOrigin(options.Origin!))
@@ -116,6 +139,15 @@ internal static class WebSocketTokenCli
         return Ok;
     }
 
+    /// <summary>
+    /// True when the origin names this machine. <c>localhost</c>, <c>127.0.0.1</c> and
+    /// <c>[::1]</c> all qualify — a page served from any of them cannot be loaded by anyone but
+    /// the person at the keyboard.
+    /// </summary>
+    private static bool IsLoopbackOrigin(string origin)
+        => Uri.TryCreate(origin, UriKind.Absolute, out var uri)
+           && (uri.IsLoopback || string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase));
+
     private static string DefaultEndpoint(HubOptions? options)
     {
         var o = options ?? new HubOptions();
@@ -135,6 +167,9 @@ internal static class WebSocketTokenCli
           --out <path>         Write the credential here. Defaults to standard output.
           --endpoint <ws-url>  Override the hub endpoint written into the credential.
           --if-missing         Reuse the credential at --out if it is still valid.
+          --enable-if-needed   Declare that this is a web-app build. The hub switches the
+                               endpoint on itself IF the origin is loopback; a public origin
+                               still has to be enabled by hand.
 
         Exit codes: 0 issued or reused, 2 bad usage, 4 the endpoint is not enabled.
         """);
@@ -146,6 +181,7 @@ internal static class WebSocketTokenCli
         public string? OutputPath { get; init; }
         public string? Endpoint { get; init; }
         public bool IfMissing { get; init; }
+        public bool EnableIfNeeded { get; init; }
 
         /// <summary>
         /// Returns null with no error for an explicit help request; null with an error for bad
@@ -156,6 +192,7 @@ internal static class WebSocketTokenCli
             error = null;
             string? origin = null, label = null, output = null, endpoint = null;
             var ifMissing = false;
+            var enableIfNeeded = false;
 
             for (var i = 0; i < args.Length; i++)
             {
@@ -167,6 +204,9 @@ internal static class WebSocketTokenCli
                         return null;
                     case "--if-missing":
                         ifMissing = true;
+                        break;
+                    case "--enable-if-needed":
+                        enableIfNeeded = true;
                         break;
                     case "--origin":
                         if (!TryValue(args, ref i, out origin, "--origin", out error)) return null;
@@ -205,6 +245,7 @@ internal static class WebSocketTokenCli
                 OutputPath = output,
                 Endpoint = endpoint,
                 IfMissing = ifMissing,
+                EnableIfNeeded = enableIfNeeded,
             };
         }
 
