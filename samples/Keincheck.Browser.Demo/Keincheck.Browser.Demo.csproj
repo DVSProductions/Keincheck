@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    A browser-hosted Avalonia app, used to validate the WebSocket transport end to end: the one
+    thing curl and unit tests cannot prove is that a real browser attaches and an AI can then
+    drive what it is showing.
+
+    DELIBERATELY NOT IN Keincheck.sln. The browser TFM needs the wasm-tools workload, which is
+    not part of a default SDK install, so putting this in the solution would break a plain
+    `dotnet build` for anyone who has not installed it, including CI. Build it on its own:
+
+        dotnet workload install wasm-tools     (once)
+        dotnet run  (from samples/Keincheck.Browser.Demo)
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-browser</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <WasmMainJSPath>wwwroot\main.js</WasmMainJSPath>
+    <!-- The libraries target net8.0; roll forward onto the installed runtime. -->
+    <RollForward>Major</RollForward>
+    <!-- Trimming a validation harness buys nothing and can only hide a problem behind a
+         trimmer warning, so leave the surface intact while we are proving the transport. -->
+    <PublishTrimmed>false</PublishTrimmed>
+    <RunAOTCompilation>false</RunAOTCompilation>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.0.4" />
+    <PackageReference Include="Avalonia.Browser" Version="12.0.4" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.4" />
+  </ItemGroup>
+
+  <!--
+    Keincheck.Avalonia supplies the adapter and UseMcpClient, and pulls in Keincheck.Client
+    (which carries WebSocketChannelConnector) transitively. Note what is NOT here:
+    Keincheck.Remote. A browser has no sockets and no X509Certificate2, so the mutual-TLS
+    transport cannot work there and referencing it would only add code that throws.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\Keincheck.Avalonia\Keincheck.Avalonia.csproj" />
+  </ItemGroup>
+
+  <!--
+    Build-time enrollment. A consumer installing the NuGet package gets this import for free;
+    a ProjectReference does not, so the sample imports it explicitly, which also means this
+    project is what proves the targets file actually works.
+  -->
+  <PropertyGroup>
+    <KeincheckWebSocketEnroll>true</KeincheckWebSocketEnroll>
+    <!-- Must match the dev server in Properties/launchSettings.json: the hub allowlists this
+         exact origin, and a page served from any other one is refused. -->
+    <KeincheckWebSocketOrigin>http://localhost:5000</KeincheckWebSocketOrigin>
+  </PropertyGroup>
+
+  <Import Project="..\..\Keincheck.Client\build\Keincheck.Client.targets" />
+
+</Project>

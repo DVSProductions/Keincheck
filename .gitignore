@@ -26,3 +26,6 @@ Releases/
 ## OS
 .DS_Store
 Thumbs.db
+
+# Browser demo enrollment output: a hub token, minted per machine. Never commit it.
+samples/Keincheck.Browser.Demo/obj/

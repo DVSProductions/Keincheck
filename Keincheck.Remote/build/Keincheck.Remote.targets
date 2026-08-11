@@ -34,8 +34,16 @@
     <KeincheckRemoteEmbedCredential Condition="'$(KeincheckRemoteEmbedCredential)' == ''">true</KeincheckRemoteEmbedCredential>
   </PropertyGroup>
 
+  <!--
+    BeforeTargets is AssignTargetPaths, not BeforeCompile, and the difference is the whole
+    feature. AssignTargetPaths is what consumes @(EmbeddedResource); an item added after it is
+    never passed to csc. With BeforeCompile this target ran, logged "embedded a remote
+    credential", wrote the file into obj, exited 0, and produced an assembly with no credential
+    in it. Every enrolled build silently shipped an app that could not authenticate, and
+    nothing anywhere said so.
+  -->
   <Target Name="KeincheckResolveRemoteCredential"
-          BeforeTargets="BeforeCompile"
+          BeforeTargets="AssignTargetPaths"
           Condition="'$(KeincheckRemoteEnroll)' == 'true' or '$(KeincheckRemoteCredentialFile)' != ''">
 
     <!--

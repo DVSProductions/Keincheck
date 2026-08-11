@@ -11,7 +11,7 @@
     default transport, and it has no X509Certificate2, so it cannot use Keincheck.Remote either.
 
     There are three ways to give an app a credential, ordered so they compose rather than compete
-    -- the same ordering Keincheck.Remote.targets uses, for the same reasons:
+    (the same ordering Keincheck.Remote.targets uses, for the same reasons):
 
       1. Supply one at runtime. Nothing here is involved: set KEINCHECK_WEBSOCKET (the
          credential) or KEINCHECK_WEBSOCKET_FILE (a path to it) on the machine that runs the
@@ -32,7 +32,7 @@
     list, and would fail on any machine without one.
 
     SECURITY. A browser downloads its assemblies to every visitor, so an embedded token is
-    readable by anyone who can load the page -- it is not a secret the way a desktop app's
+    readable by anyone who can load the page; it is not a secret the way a desktop app's
     embedded credential is. That is fine for an app served from localhost during development. For
     a publicly deployed site, assume the token is public: what still protects the hub is the
     origin allowlist, which a page on another site cannot satisfy.
@@ -43,14 +43,22 @@
     <KeincheckWebSocketEmbedCredential Condition="'$(KeincheckWebSocketEmbedCredential)' == ''">true</KeincheckWebSocketEmbedCredential>
   </PropertyGroup>
 
+  <!--
+    BeforeTargets is AssignTargetPaths, and that is load-bearing rather than arbitrary.
+    AssignTargetPaths is what consumes @(EmbeddedResource); everything downstream reads the
+    item lists it produced. An EmbeddedResource added after it, from BeforeCompile or even from
+    PrepareResourceNames, is simply never seen: csc is invoked without it, the build succeeds,
+    the credential file sits in obj, and the assembly ships without the resource. Nothing warns.
+    Two earlier hooks were tried against a real browser app before this one held.
+  -->
   <Target Name="KeincheckResolveWebSocketCredential"
-          BeforeTargets="BeforeCompile"
+          BeforeTargets="AssignTargetPaths"
           Condition="'$(KeincheckWebSocketEnroll)' == 'true' or '$(KeincheckWebSocketCredentialFile)' != ''">
 
     <!--
       Resolved INSIDE the target and made absolute: $(IntermediateOutputPath) is not set when
       this file is evaluated, so defaulting it in the PropertyGroup above would write the
-      credential to the PROJECT ROOT -- a token in the source tree, ready to be committed.
+      credential to the PROJECT ROOT: a token in the source tree, ready to be committed.
     -->
     <PropertyGroup>
       <_KcWsSupplied Condition="'$(KeincheckWebSocketCredentialFile)' != ''">$(KeincheckWebSocketCredentialFile)</_KcWsSupplied>
@@ -67,7 +75,7 @@
     </PropertyGroup>
 
     <Error Condition="'$(_KcWsPath)' == '' and '$(KeincheckWebSocketEnroll)' == 'true' and '$(KeincheckWebSocketOrigin)' == ''"
-           Text="Keincheck: KeincheckWebSocketEnroll is true but KeincheckWebSocketOrigin is not set. Set it to the URL the app is served from, e.g. http://localhost:5000 -- the hub allowlists that origin, and a browser page from anywhere else is refused." />
+           Text="Keincheck: KeincheckWebSocketEnroll is true but KeincheckWebSocketOrigin is not set. Set it to the URL the app is served from, e.g. http://localhost:5000. The hub allowlists that origin, and a browser page from anywhere else is refused." />
 
     <!--
       Option 2: nothing supplied, so ask the installed hub. Inline rather than a CallTarget:
@@ -93,7 +101,7 @@
 
     <!--
       IgnoreExitCode with deliberately NO ContinueOnError: ContinueOnError makes MSBuild swallow
-      the task's outputs, so ExitCode comes back empty and the diagnostics below never fire --
+      the task's outputs, so ExitCode comes back empty and the diagnostics below never fire:
       a build with no hub would report success and silently produce nothing.
     -->
     <Exec Condition="'$(_KcWsPath)' == '' and '$(KeincheckWebSocketEnroll)' == 'true' and Exists('$(_KcWsHubExe)')"
@@ -108,6 +116,16 @@
              Text="Keincheck: the hub's WebSocket endpoint is not enabled on this machine, so no token was issued. Enable it once from the hub window. This build will not be able to attach from a browser." />
     <Warning Condition="'$(_KcWsExit)' != '' and '$(_KcWsExit)' != '0' and '$(_KcWsExit)' != '4'"
              Text="Keincheck: the hub declined to issue a WebSocket token (exit $(_KcWsExit)). This build will not be able to attach from a browser." />
+
+    <!--
+      Succeeded, and produced nothing. A hub older than this transport does not recognise the
+      issue-websocket-token verb at all: it falls through to the single-instance election,
+      prints "already running" and exits 0. Without this the build reports complete success and
+      silently ships an unenrolled app, which is the exact failure the Exec above is careful
+      not to cause. It took building a real browser app against a released hub to find it.
+    -->
+    <Warning Condition="'$(_KcWsPath)' == '' and '$(KeincheckWebSocketEnroll)' == 'true' and Exists('$(_KcWsHubExe)') and '$(_KcWsExit)' == '0' and !Exists('$(_KcWsMinted)')"
+             Text="Keincheck: the hub at '$(_KcWsHubExe)' accepted the command but wrote no credential, so it is probably older than the WebSocket transport. Update the hub, or point KeincheckHubExe at a newer build. This build will not be able to attach from a browser." />
 
     <PropertyGroup Condition="'$(_KcWsPath)' == '' and Exists('$(_KcWsMinted)')">
       <_KcWsPath>$(_KcWsMinted)</_KcWsPath>

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json.schemastore.org/launchsettings.json",
+  "profiles": {
+    "Keincheck.Browser.Demo": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "//": "Pinned to 5000 on purpose: the hub allowlists the exact origin the build declared in KeincheckWebSocketOrigin, and a page served from any other port is refused with 403.",
+      "applicationUrl": "http://localhost:5000",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}
