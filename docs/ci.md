@@ -32,7 +32,42 @@ The UI tests run on `Avalonia.Headless`, so the Unix jobs need no display server
 path (RID-specific assets, the self-contained apphost, ReadyToRun cross-compilation), and a
 release tag is the wrong place to find out that broke.
 
-`e2e.yml` stays Windows-only: it installs a real Velopack `Setup.exe`.
+`e2e.yml` has two jobs. `e2e` stays Windows-only — it installs a real Velopack `Setup.exe`,
+drives the WPF adapter and builds a WinExe consumer, none of which exist elsewhere.
+`browser-linux` runs the browser leg on Ubuntu, and is the only place the **hub itself** is
+proven on Linux: its pipes become Unix domain sockets, its single-instance mutex becomes shared
+memory under the temp dir, and its Avalonia tray needs an X server (`xvfb`) plus the X11
+session-management libraries a self-contained publish does not carry.
+
+## The browser leg
+
+A browser is the one client nothing else covers, and the WebSocket transport exists solely for
+it — WebAssembly has no named pipes, no sockets and no `X509Certificate2`, so neither the pipe
+nor the mutual-TLS transport can reach the hub.
+
+Both jobs do the same four things:
+
+1. `dotnet workload install wasm-tools` — the browser target framework needs it, and **without
+   it the build silently produces an ordinary .NET app**: a `.exe`, a `runtimes/` folder, no
+   `_framework`, no `.wasm`, and complete success.
+2. Publish `samples/Keincheck.Browser.Demo` with `KeincheckHubExe` pointing at the hub. That
+   build asks the hub to allowlist `http://localhost:5000`, mint a token and embed it.
+3. `playwright install chromium` — Playwright's own browser, not the runner's, so the version
+   is pinned to the package rather than to whatever the image ships this month.
+4. Run `BrowserE2ETests`, which serves the bundle, opens it headless, waits for a **new** client
+   to appear, and drives it.
+
+Three things about it are load-bearing:
+
+- **Port 5000 is fixed.** The demo is enrolled against that exact origin and the hub answers
+  `403` for any other, which reads as a transport failure rather than a config mismatch.
+- **The test waits for a client that was not there before it opened the page.** Matching on
+  `appId` alone binds to a browser tab left over from an earlier run — that is not hypothetical,
+  it happened on the first run and read a counter from a page the test had never touched.
+- **It asserts the app reacted**, not merely that the tool returned `ok`: the counter must go
+  `0` → `2`, the echo must contain the typed text. A click that arrives and does nothing would
+  otherwise pass. A screenshot is saved as an artifact, because a WebAssembly app whose renderer
+  never came up still answers every tool from the visual tree.
 
 **Adding a project?** Add it to `Keincheck.CrossPlatform.slnf` too, unless it is Windows-only.
 A project missing from the filter is simply never built on Linux or macOS — silently.

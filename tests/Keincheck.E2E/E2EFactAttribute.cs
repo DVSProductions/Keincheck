@@ -30,6 +30,29 @@ public sealed class E2EFactAttribute : FactAttribute, ITraitAttribute
     }
 }
 
+/// <summary>
+/// An <see cref="E2EFactAttribute"/> that additionally skips unless a WebAssembly bundle is
+/// configured, so the browser leg is opt-in on top of an already opt-in suite.
+/// </summary>
+/// <remarks>
+/// Building the bundle needs the wasm-tools workload, which is not in a default SDK install.
+/// A developer running the E2E suite without it should see these skipped with a reason, not
+/// fail on a missing directory.
+/// </remarks>
+[TraitDiscoverer("Keincheck.E2E.E2ETraitDiscoverer", "Keincheck.E2E")]
+public sealed class BrowserE2EFactAttribute : FactAttribute, ITraitAttribute
+{
+    public BrowserE2EFactAttribute()
+    {
+        if (!E2EEnvironment.IsEnabled)
+            Skip = E2EEnvironment.DisabledReason;
+        else if (E2EEnvironment.BrowserBundle is null)
+            Skip = $"Browser E2E disabled. Set {E2EEnvironment.BrowserBundleVar} to a published "
+                   + "AppBundle (dotnet publish samples/Keincheck.Browser.Demo, needs the "
+                   + "wasm-tools workload).";
+    }
+}
+
 /// <summary>Supplies <c>Category=E2E</c> so <c>--filter "Category!=E2E"</c> works.</summary>
 public sealed class E2ETraitDiscoverer : ITraitDiscoverer
 {
@@ -61,6 +84,30 @@ public static class E2EEnvironment
 
     /// <summary>Where logs, screenshots and exported scenarios are written for upload.</summary>
     public const string ArtifactsVar = "KEINCHECK_E2E_ARTIFACTS";
+
+    /// <summary>
+    /// The published WebAssembly AppBundle of the browser demo (the directory holding
+    /// <c>index.html</c> and <c>_framework/</c>). Unset skips the browser leg.
+    /// </summary>
+    /// <remarks>
+    /// The bundle is built by the workflow rather than by the test. Building wasm in-test would
+    /// require the wasm-tools workload at test time and would report a build failure as a test
+    /// failure, which is the wrong place to look.
+    /// </remarks>
+    public const string BrowserBundleVar = "KEINCHECK_E2E_BROWSER_BUNDLE";
+
+    /// <summary>Which Playwright engine to drive: <c>chromium</c> (default) or <c>firefox</c>.</summary>
+    public const string BrowserVar = "KEINCHECK_E2E_BROWSER";
+
+    /// <summary>The browser bundle path, or null when the browser leg is not configured.</summary>
+    public static string? BrowserBundle
+    {
+        get
+        {
+            var dir = Environment.GetEnvironmentVariable(BrowserBundleVar);
+            return string.IsNullOrWhiteSpace(dir) ? null : dir;
+        }
+    }
 
     /// <summary>
     /// Opts into the remote leg. Off by default even when the suite is enabled, because
