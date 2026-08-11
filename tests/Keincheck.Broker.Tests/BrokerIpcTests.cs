@@ -17,7 +17,7 @@ public sealed class BrokerIpcTests
 
     // A unique per-test pipe name so runs never collide with a stale instance, with the
     // hub's live control pipe, or with each other under parallel execution.
-    private static string NewPipeName() => $"Keincheck.test.{Guid.NewGuid():N}";
+    private static string NewPipeName() => $"Keincheck.t{Guid.NewGuid():N}"[..20];
 
     private static IReadOnlyList<ToolDescriptor> SampleTools() => new[]
     {

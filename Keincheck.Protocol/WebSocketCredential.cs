@@ -76,8 +76,16 @@ public sealed class WebSocketCredential
             throw new FormatException("The WebSocket credential has no endpoint.");
         if (string.IsNullOrWhiteSpace(parsed.Token))
             throw new FormatException("The WebSocket credential has no token.");
-        if (!Uri.TryCreate(parsed.Endpoint, UriKind.Absolute, out _))
-            throw new FormatException($"The WebSocket credential's endpoint '{parsed.Endpoint}' is not an absolute URI.");
+        // Scheme-checked, not merely "is it absolute". On Unix a bare path like "/ws" parses as
+        // an absolute file: URI and passes an absolute-only check, so the same credential was
+        // accepted on Linux and rejected on Windows. Requiring ws/wss is both portable and a
+        // better rule: an endpoint this connector cannot dial is not a usable endpoint.
+        if (!Uri.TryCreate(parsed.Endpoint, UriKind.Absolute, out var endpoint)
+            || endpoint.Scheme is not ("ws" or "wss"))
+        {
+            throw new FormatException(
+                $"The WebSocket credential's endpoint '{parsed.Endpoint}' is not a ws:// or wss:// URI.");
+        }
 
         return parsed;
     }

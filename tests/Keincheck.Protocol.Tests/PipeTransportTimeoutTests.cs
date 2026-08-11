@@ -10,7 +10,7 @@ namespace Keincheck.Protocol.Tests;
 public class PipeTransportTimeoutTests
 {
     /// <summary>A pipe name nothing is listening on.</summary>
-    private static string DeadPipe() => $"Keincheck.nothing-here.{Guid.NewGuid():N}";
+    private static string DeadPipe() => $"Keincheck.nf{Guid.NewGuid():N}"[..20];
 
     [Fact]
     public async Task Connecting_To_A_Pipe_Nobody_Is_Serving_Times_Out()
@@ -75,7 +75,7 @@ public class PipeTransportTimeoutTests
     {
         // The guard must not break the path that matters: a hub that IS up gets connected to,
         // well inside the timeout.
-        var pipe = $"Keincheck.test.{Guid.NewGuid():N}";
+        var pipe = $"Keincheck.t{Guid.NewGuid():N}"[..20];
         using var server = PipeTransport.CreateServerStream(pipe);
 
         var accept = PipeTransport.AcceptAsync(server, CancellationToken.None);

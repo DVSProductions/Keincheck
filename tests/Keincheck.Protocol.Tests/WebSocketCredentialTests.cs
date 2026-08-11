@@ -37,7 +37,12 @@ public sealed class WebSocketCredentialTests
     [InlineData("""{ "endpoint": "ws://x/ws" }""")]            // no token
     [InlineData("""{ "endpoint": "", "token": "t" }""")]       // blank endpoint
     [InlineData("""{ "endpoint": "ws://x/ws", "token": "" }""")] // blank token
-    [InlineData("""{ "endpoint": "/ws", "token": "t" }""")]    // not absolute
+    // "/ws" is the interesting one: on Unix it parses as an absolute file: URI, so an
+    // absolute-only check accepted it on Linux and rejected it on Windows. The rule is the
+    // scheme, which is portable and is what the connector can actually dial.
+    [InlineData("""{ "endpoint": "/ws", "token": "t" }""")]
+    [InlineData("""{ "endpoint": "file:///ws", "token": "t" }""")]
+    [InlineData("""{ "endpoint": "http://localhost:3100/ws", "token": "t" }""")]
     public void Refuses_Anything_That_Is_Not_A_Usable_Credential(string text)
     {
         Assert.Throws<FormatException>(() => WebSocketCredential.Parse(text));
