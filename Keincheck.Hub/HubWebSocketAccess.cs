@@ -249,43 +249,81 @@ public sealed class HubWebSocketAccess
 
     // ------------------------------------------------------------------ persistence
 
-    // The write time the in-memory policy was loaded from, so an external write can be noticed
-    // without re-reading and re-parsing the file on every single handshake.
-    private DateTime _loadedStamp;
+    // The exact text the in-memory policy was parsed from. Comparing CONTENT, not a timestamp:
+    // last-write-time has filesystem-tick granularity, so a build that issued a token in the
+    // same tick as the hub's own save left the stamp unchanged and the hub never reloaded --
+    // the freshly issued token was refused until the hub restarted. Reading a few hundred bytes
+    // per handshake costs nothing; a client attaches once.
+    private string? _loadedRaw;
 
-    /// <summary>Re-reads the policy if the file changed under us. Caller holds the lock.</summary>
+    /// <summary>Re-reads the policy if the file differs from what we parsed. Caller holds the lock.</summary>
     private void ReloadIfChanged()
     {
+        string? raw;
         try
         {
-            var stamp = File.Exists(_path) ? File.GetLastWriteTimeUtc(_path) : default;
-            if (stamp != _loadedStamp)
-                Load();
+            raw = File.Exists(_path) ? File.ReadAllText(_path) : null;
         }
-        catch
+        catch (IOException)
         {
-            // An unreadable timestamp is not a reason to refuse a request the in-memory policy
-            // already allows; the next change will be picked up.
+            // Transiently unreadable, most likely a writer holding it for an instant. Keeping
+            // the in-memory policy is right: a momentary lock must not refuse a client that the
+            // loaded policy allows, and the next handshake picks the change up.
+            return;
         }
+
+        if (raw == _loadedRaw)
+            return;
+
+        Apply(raw);
     }
 
     private void Load()
     {
+        string? raw;
         try
         {
-            _loadedStamp = File.Exists(_path) ? File.GetLastWriteTimeUtc(_path) : default;
+            raw = File.Exists(_path) ? File.ReadAllText(_path) : null;
+        }
+        catch
+        {
+            raw = null; // unreadable at open time reads as "no policy", which is closed
+        }
 
-            if (!File.Exists(_path))
+        Apply(raw);
+    }
+
+    /// <summary>
+    /// Replaces the in-memory policy with <paramref name="raw"/>. Null (no file) and unparseable
+    /// content both land closed: a policy that cannot be understood must never fail open.
+    /// </summary>
+    private void Apply(string? raw)
+    {
+        _loadedRaw = raw;
+
+        void Reset()
+        {
+            _enabled = false;
+            EnabledBy = null;
+            EnabledAt = null;
+            _origins.Clear();
+            _tokens.Clear();
+        }
+
+        if (raw is null)
+        {
+            Reset();
+            return;
+        }
+
+        try
+        {
+            var dto = JsonSerializer.Deserialize<Dto>(raw);
+            if (dto is null)
             {
-                _enabled = false;
-                _origins.Clear();
-                _tokens.Clear();
+                Reset();
                 return;
             }
-
-            var dto = JsonSerializer.Deserialize<Dto>(File.ReadAllText(_path));
-            if (dto is null)
-                return;
 
             _enabled = dto.Enabled;
             EnabledBy = dto.EnabledBy;
@@ -297,11 +335,7 @@ public sealed class HubWebSocketAccess
         }
         catch
         {
-            // Corrupt or unreadable: fall back to the closed default rather than to whatever
-            // half-parsed. A policy file that cannot be read must not fail open.
-            _enabled = false;
-            _origins.Clear();
-            _tokens.Clear();
+            Reset();
         }
     }
 
@@ -318,11 +352,12 @@ public sealed class HubWebSocketAccess
                 Origins = _origins.ToList(),
                 Tokens = _tokens.ToList(),
             };
-            File.WriteAllText(_path, JsonSerializer.Serialize(dto, s_json));
+            var raw = JsonSerializer.Serialize(dto, s_json);
+            File.WriteAllText(_path, raw);
 
-            // Our own write must not read back as somebody else's, or the next Check would
-            // reload the file we just wrote and pointlessly re-parse it.
-            _loadedStamp = File.GetLastWriteTimeUtc(_path);
+            // Remember exactly what we wrote, so the next Check sees its own content and does
+            // not pointlessly re-parse it.
+            _loadedRaw = raw;
         }
         catch
         {

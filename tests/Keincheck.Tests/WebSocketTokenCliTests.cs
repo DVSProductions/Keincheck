@@ -239,4 +239,39 @@ public sealed class WebSocketTokenCliTests : IDisposable
 
         Assert.Equal(WebSocketGateResult.Allowed, hubSideView.Check(Origin, credential.Token));
     }
+
+    [Fact]
+    public void A_Token_Issued_In_The_Same_Filesystem_Tick_Is_Still_Picked_Up()
+    {
+        // The reload used to compare last-write-time, which has filesystem-tick granularity.
+        // When the hub's own save and the build's write landed in the same tick the stamp did
+        // not change, the hub never reloaded, and the freshly issued token was refused until it
+        // restarted. It reproduced on a CI runner and not on a developer machine, which is the
+        // worst way for a race to announce itself -- so this drives the two writes back to back
+        // with nothing in between.
+        var hubSideView = HubWebSocketAccess.Open(PolicyPath);
+        hubSideView.SetEnabled(true);                      // write one
+        var buildSideProcess = HubWebSocketAccess.Open(PolicyPath);
+
+        Run(buildSideProcess, "--issue-websocket-token", "--origin", Origin, "--out", OutPath);
+        var credential = WebSocketCredential.LoadFile(OutPath);   // write two, same tick
+
+        Assert.Equal(WebSocketGateResult.Allowed, hubSideView.Check(Origin, credential.Token));
+    }
+
+    [Fact]
+    public void A_Policy_Deleted_Underneath_The_Hub_Closes_The_Gate()
+    {
+        // The other direction of the same reload: revoking by removing the file must take
+        // effect without a restart, and must land closed rather than leaving the last-known
+        // policy live.
+        var access = Enabled();
+        var token = access.IssueToken("demo");
+        access.AllowOrigin(Origin);
+        Assert.Equal(WebSocketGateResult.Allowed, access.Check(Origin, token));
+
+        File.Delete(PolicyPath);
+
+        Assert.Equal(WebSocketGateResult.Disabled, access.Check(Origin, token));
+    }
 }
