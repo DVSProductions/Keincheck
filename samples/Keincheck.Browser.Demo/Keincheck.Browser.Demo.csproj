@@ -15,6 +15,13 @@
 
   <PropertyGroup>
     <TargetFramework>net10.0-browser</TargetFramework>
+    <!--
+      Required, and quietly so. The browser target framework alone does NOT make the SDK build
+      for WebAssembly: without this RID it compiles as an ordinary .NET app, produces a .exe and
+      a runtimes/ folder, and reports complete success. There is no _framework, no dotnet.js and
+      no .wasm anywhere, and nothing warns that what you built cannot run in a browser.
+    -->
+    <RuntimeIdentifier>browser-wasm</RuntimeIdentifier>
     <OutputType>Exe</OutputType>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -27,6 +34,14 @@
     <PublishTrimmed>false</PublishTrimmed>
     <RunAOTCompilation>false</RunAOTCompilation>
   </PropertyGroup>
+
+  <!--
+    Static files the wasm SDK copies into the AppBundle. WasmMainJSPath alone deploys main.js
+    and nothing else, so without this the bundle has a runtime and no page to load it from.
+  -->
+  <ItemGroup>
+    <WasmExtraFilesToDeploy Include="wwwroot\**" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Avalonia" Version="12.0.4" />

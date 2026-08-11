@@ -1,6 +1,5 @@
 using Avalonia.Controls;
 using Avalonia.Interactivity;
-using Avalonia.Markup.Xaml;
 
 namespace Keincheck.Browser.Demo;
 
@@ -39,7 +38,11 @@ public partial class MainView : UserControl
                 : "(nothing selected)";
     }
 
-    private void InitializeComponent() => AvaloniaXamlLoader.Load(this);
+    // InitializeComponent is NOT hand-written here, and that matters. Avalonia's generator emits
+    // it together with the x:Name field assignments; supplying your own suppresses the generated
+    // one, so every named field stays null and the first line of this constructor throws a
+    // NullReferenceException during startup -- which in a browser is a black page and a stack
+    // trace in the console, with nothing pointing at the cause.
 
     private void OnIncrement(object? sender, RoutedEventArgs e)
         => CounterText.Text = (++_count).ToString();
