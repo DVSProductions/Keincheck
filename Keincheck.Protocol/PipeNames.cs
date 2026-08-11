@@ -35,7 +35,15 @@ public static class PipeNames
     /// to accept the next connection. <paramref name="token"/> is an opaque,
     /// hub-chosen connection id.
     /// </summary>
-    public static string McpSessionPipe(string token) => $"Keincheck.mcp.{UserScope}.{Sanitize(token)}";
+    public static string McpSessionPipe(string token)
+    {
+        // The token is shortened to whatever the WHOLE name can still afford, not to a fixed
+        // size. Capping each component independently is not enough: a 14-character login plus a
+        // 20-character token already overflows a macOS socket path, and the failure is an
+        // ArgumentOutOfRangeException from inside the socket layer that names only a path.
+        var prefix = $"Keincheck.mcp.{UserScope}.";
+        return prefix + Shorten(Sanitize(token), MaxNameLength - prefix.Length);
+    }
 
     /// <summary>
     /// The environment variable the hub sets on a process it launches, and that the client
@@ -45,6 +53,41 @@ public static class PipeNames
     /// </summary>
     public const string LaunchTokenEnvVar = "KEINCHECK_LAUNCH_TOKEN";
 
+    /// <summary>
+    /// The longest a sanitized component may be before it is shortened.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// On Unix, .NET implements named pipes as domain sockets at
+    /// <c>$TMPDIR/CoreFxPipe_&lt;name&gt;</c>, and a domain socket path may be at most <b>104</b>
+    /// characters on macOS. macOS gives each user a <c>TMPDIR</c> like
+    /// <c>/var/folders/xx/…/T/</c> — 49 characters — which leaves roughly 44 for the whole
+    /// name. Exceed it and the connect throws <see cref="ArgumentOutOfRangeException"/> from
+    /// deep inside the socket layer, naming a path and nothing else.
+    /// </para>
+    /// <para>
+    /// 20 is not arbitrary: Windows itself caps a SAM account name at 20 characters, so no
+    /// Windows user has ever had a <see cref="UserScope"/> longer than this and no existing
+    /// Windows pipe name changes. It only ever engages for a long POSIX login.
+    /// </para>
+    /// </remarks>
+    internal const int MaxComponentLength = 20;
+
+    /// <summary>
+    /// The longest a whole pipe name may be: 104 (the macOS domain socket limit) minus a
+    /// 49-character per-user <c>TMPDIR</c> minus the BCL's <c>CoreFxPipe_</c> prefix.
+    /// </summary>
+    internal const int MaxNameLength = 44;
+
+    /// <summary>
+    /// Sanitizes to letters, digits, dash and underscore, and shortens anything overlong to a
+    /// stable, collision-resistant form so the resulting path fits a macOS domain socket.
+    /// </summary>
+    /// <remarks>
+    /// Shortening is deterministic because both ends compute the name independently from the
+    /// same inputs on the same machine — a random or time-based suffix would have the hub and
+    /// the client listening and dialling different sockets.
+    /// </remarks>
     private static string Sanitize(string raw)
     {
         if (string.IsNullOrEmpty(raw))
@@ -54,6 +97,35 @@ public static class PipeNames
         var n = 0;
         foreach (var c in raw)
             buf[n++] = char.IsLetterOrDigit(c) || c is '-' or '_' ? c : '_';
-        return new string(buf[..n]);
+        var clean = new string(buf[..n]);
+
+        return Shorten(clean, MaxComponentLength);
+    }
+
+    /// <summary>
+    /// Caps <paramref name="value"/> at <paramref name="max"/>, keeping a readable prefix and
+    /// appending a hash of the original so two long values sharing a prefix stay distinct.
+    /// </summary>
+    /// <remarks>
+    /// Plain truncation would map every token with the same leading characters onto one socket
+    /// and silently attach a client to the wrong session. The hash is deterministic because
+    /// both ends compute the name independently from the same inputs on the same machine — a
+    /// random or time-based suffix would leave them listening and dialling different sockets,
+    /// which presents as a hang rather than an error.
+    /// </remarks>
+    private static string Shorten(string value, int max)
+    {
+        if (value.Length <= max)
+            return value;
+
+        var hash = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(value));
+        var suffix = Convert.ToHexString(hash.AsSpan(0, 4)).ToLowerInvariant(); // 8 chars
+
+        // Too little room even for the hash: the hash alone is still unique and still fits.
+        if (max <= suffix.Length)
+            return suffix[..Math.Max(1, max)];
+
+        return string.Concat(value.AsSpan(0, max - suffix.Length - 1), "_", suffix);
     }
 }

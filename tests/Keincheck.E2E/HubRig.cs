@@ -24,11 +24,19 @@ public sealed class HubRig : IAsyncLifetime
     private readonly List<ManagedProcess> _children = [];
     private ManagedProcess? _hub;
 
-    /// <summary>Directory holding <c>Keincheck.Hub.exe</c> and <c>keincheck-connect.exe</c>.</summary>
+    /// <summary>Directory holding the hub and the <c>keincheck-connect</c> shim.</summary>
     public string HubDirectory { get; private set; } = "";
 
-    public string HubExe => Path.Combine(HubDirectory, "Keincheck.Hub.exe");
-    public string ConnectExe => Path.Combine(HubDirectory, "keincheck-connect.exe");
+    /// <summary>
+    /// The executable suffix for this platform: <c>.exe</c> on Windows, nothing elsewhere.
+    /// The POSIX hosts produce extension-less binaries, so a hardcoded <c>.exe</c> resolves to
+    /// a path that does not exist and the rig fails to start with a file-not-found rather than
+    /// anything that names the real problem.
+    /// </summary>
+    public static string ExeSuffix => OperatingSystem.IsWindows() ? ".exe" : "";
+
+    public string HubExe => Path.Combine(HubDirectory, $"Keincheck.Hub{ExeSuffix}");
+    public string ConnectExe => Path.Combine(HubDirectory, $"keincheck-connect{ExeSuffix}");
 
     /// <summary>The hub process this rig started. Null before <see cref="InitializeAsync"/>.</summary>
     public ManagedProcess Hub => _hub ?? throw new InvalidOperationException("The rig has no hub.");

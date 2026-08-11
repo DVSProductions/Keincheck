@@ -17,6 +17,20 @@ public sealed class AgentMcpSetupTests
     private const string Exe = @"C:\Program Files\Keincheck\keincheck-connect.exe";
 
     [Fact]
+    public void Claude_Desktop_Config_Path_Is_Where_The_App_Actually_Reads_It()
+    {
+        var path = AgentMcpSetup.TargetPath(AgentTarget.ClaudeDesktop);
+
+        Assert.EndsWith(Path.Combine("Claude", "claude_desktop_config.json"), path);
+
+        // macOS is the case worth pinning: .NET maps SpecialFolder.ApplicationData to
+        // ~/.config there (the XDG convention), but a Mac app keeps its config under
+        // ~/Library/Application Support — so the generic path writes a file Claude never reads.
+        if (OperatingSystem.IsMacOS())
+            Assert.Contains(Path.Combine("Library", "Application Support"), path);
+    }
+
+    [Fact]
     public void Adds_Server_To_Empty_Config()
     {
         var (json, outcome) = AgentMcpSetup.AddServer(null, Name, Exe);

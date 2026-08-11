@@ -55,12 +55,44 @@ public static class RemoteCertificates
     public static readonly TimeSpan ClockSkew = TimeSpan.FromMinutes(5);
 
     /// <summary>
-    /// The storage flags TLS actually accepts on Windows. Not <c>EphemeralKeySet</c> (fails
-    /// outright) and not <c>PersistKeySet</c> (which would leave the key container behind
-    /// after disposal, accumulating one per load).
+    /// The storage flags TLS actually accepts. Not <c>EphemeralKeySet</c> (fails outright on
+    /// Windows, and is refused on every Apple platform) and not <c>PersistKeySet</c> (which
+    /// would leave the key container behind after disposal, accumulating one per load).
     /// </summary>
-    private const X509KeyStorageFlags LoadFlags =
-        X509KeyStorageFlags.UserKeySet | X509KeyStorageFlags.Exportable;
+    private static readonly X509KeyStorageFlags LoadFlags = LoadFlagsFor(IsAppleMobile);
+
+    /// <summary>
+    /// True on Apple's mobile-derived platforms. <c>IsIOS</c> already covers Mac Catalyst, but
+    /// all three are named because they are three separate deployment targets, not one.
+    /// </summary>
+    internal static bool IsAppleMobile =>
+        OperatingSystem.IsIOS() || OperatingSystem.IsTvOS() || OperatingSystem.IsMacCatalyst();
+
+    /// <summary>
+    /// The PKCS#12 storage flags for a platform, split out from <see cref="LoadFlags"/> so the
+    /// rule is testable from any host rather than only observable on the platform it concerns.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// iOS, tvOS and Mac Catalyst <b>throw</b> <see cref="PlatformNotSupportedException"/>
+    /// ("The PKCS#12 Exportable flag is not supported on this platform") when
+    /// <see cref="X509KeyStorageFlags.Exportable"/> is asserted — see
+    /// <c>AppleCertificatePal.ImportExport.iOS.cs</c>, which rejects <c>Exportable</c> and
+    /// <c>PersistKeySet</c> and silently ignores <c>UserKeySet</c>. Without this split, merely
+    /// referencing this package from a Mac Catalyst app made every credential load throw.
+    /// </para>
+    /// <para>
+    /// Dropping the flag there costs nothing, because <b>nothing re-exports a loaded
+    /// certificate</b>. A loaded CA signs leaves (signing uses the key, it does not export it),
+    /// a loaded server certificate does server auth, a loaded client certificate does client
+    /// auth. Every <see cref="ExportPkcs12"/> call site passes a freshly created in-memory
+    /// certificate, and the one other export — the peer's certificate in <c>RemoteTls</c> — is
+    /// <see cref="X509ContentType.Cert"/>, public-only, which this flag does not govern.
+    /// </para>
+    /// </remarks>
+    internal static X509KeyStorageFlags LoadFlagsFor(bool appleMobile) => appleMobile
+        ? X509KeyStorageFlags.UserKeySet
+        : X509KeyStorageFlags.UserKeySet | X509KeyStorageFlags.Exportable;
 
     // ---------------------------------------------------------------- creation
 

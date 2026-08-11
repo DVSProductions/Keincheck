@@ -1,3 +1,5 @@
+using Keincheck.Protocol;
+
 namespace Keincheck.Hub;
 
 /// <summary>
@@ -7,6 +9,13 @@ public sealed class HubOptions
 {
     /// <summary>Loopback port for the HTTP MCP endpoint. Default 3100.</summary>
     public int HttpPort { get; set; } = 3100;
+
+    /// <summary>
+    /// Path on the loopback HTTP endpoint where apps with no named pipes attach over a
+    /// WebSocket. Serving it is gated by <see cref="HubWebSocketAccess"/>, which is off until
+    /// an operator turns it on — this only decides where it would answer.
+    /// </summary>
+    public string WebSocketPath { get; set; } = WebSocketEndpoint.DefaultPath;
 
     /// <summary>
     /// When true, also run an MCP server over the control pipe so the stdio shim can

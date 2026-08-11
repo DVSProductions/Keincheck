@@ -8,6 +8,13 @@
     <!-- The hub targets net10 but references the net8 Protocol lib; roll forward
          so it runs on the installed .NET 10 runtime. -->
     <RollForward>Major</RollForward>
+  </PropertyGroup>
+
+  <!-- Windows-only build knobs. Both are no-ops on a POSIX target — COM interop does not
+       exist there and there is no Win32 resource section to stamp an icon into — but keeping
+       them scoped documents that, and keeps the linux/osx publishes free of dead properties.
+       The Linux/macOS package icons come from the vpk pack icon option (see release.yml). -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' == '' or $([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('win'))">
     <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
     <!-- Win32 executable icon (shows on the .exe, taskbar, and Velopack shortcut). -->
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>

@@ -11,7 +11,9 @@ name: E2E
 #   * record/replay actually re-drives a UI rather than merely reporting success;
 #   * the read-only gate refuses writes while still allowing reads;
 #   * a launched/restarted client keeps its id;
-#   * the packages restore and work in a consuming project.
+#   * the packages restore and work in a consuming project;
+#   * a REAL browser running the WebAssembly demo attaches over the WebSocket transport
+#     and is drivable — on Windows, and (browser-linux) against a hub running on Linux.
 
 # push is scoped to main so a branch with an open PR is not built twice. An unscoped
 # `push:` also matches tag pushes, so cutting a release re-ran the whole 15-minute job
@@ -126,6 +128,45 @@ jobs:
           dotnet publish samples/Keincheck.Wpf.Demo/Keincheck.Wpf.Demo.csproj -c Release -o demo-wpf
           "KEINCHECK_E2E_DEMO_EXE=$PWD\demo-avalonia\Keincheck.Demo.exe"      | Out-File $env:GITHUB_ENV -Append
           "KEINCHECK_E2E_WPF_DEMO_EXE=$PWD\demo-wpf\Keincheck.Wpf.Demo.exe"   | Out-File $env:GITHUB_ENV -Append
+
+      # ---- the browser app ----------------------------------------------------
+      #
+      # A browser is the one client nothing else here covers, and the WebSocket transport
+      # exists solely for it: WebAssembly has no named pipes, no sockets and no
+      # X509Certificate2, so neither the pipe nor the mutual-TLS transport can reach the hub.
+      # Every part of this chain broke at least once while it was written, and each break
+      # looked like success somewhere else, so it is worth the two extra minutes.
+
+      - name: Install the WebAssembly workload
+        run: dotnet workload install wasm-tools
+
+      - name: Publish the browser demo, enrolled against the installed hub
+        run: |
+          # Enrollment runs during THIS build: it asks the installed hub to allowlist
+          # http://localhost:5000, mint a token, and embed the credential. --enable-if-needed
+          # lets the hub open its own endpoint because the origin is loopback.
+          dotnet publish samples/Keincheck.Browser.Demo/Keincheck.Browser.Demo.csproj -c Release `
+            -p:KeincheckHubExe="$env:KEINCHECK_E2E_HUB_DIR\Keincheck.Hub.exe"
+          if ($LASTEXITCODE -ne 0) { throw "the browser demo failed to publish" }
+
+          $bundle = "samples/Keincheck.Browser.Demo/bin/Release/net10.0-browser/browser-wasm/AppBundle"
+          # The bundle is what a browser loads; without index.html there is a runtime and no
+          # page to start it, and the test would fail much later looking like a transport bug.
+          if (-not (Test-Path "$bundle/index.html")) { throw "no AppBundle at $bundle" }
+          "KEINCHECK_E2E_BROWSER_BUNDLE=$PWD\$($bundle -replace '/','\')" | Out-File $env:GITHUB_ENV -Append
+
+      - name: Install the Playwright browser
+        run: |
+          # The E2E project must be BUILT first: playwright.ps1 is emitted into its output by
+          # the Microsoft.Playwright package, so installing before building looks for a script
+          # that does not exist yet.
+          dotnet build tests/Keincheck.E2E/Keincheck.E2E.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "the E2E project failed to build" }
+
+          # Playwright's own Chromium, not the runner's: preinstalled browsers vary by image
+          # and change without notice, and this way the version is pinned to the package.
+          & tests/Keincheck.E2E/bin/Release/net10.0/playwright.ps1 install chromium
+          if ($LASTEXITCODE -ne 0) { throw "playwright install failed" }
 
       # ---- the packaged consumer: restore + build + (later) run ---------------
 
@@ -246,5 +287,107 @@ jobs:
           # files and the hub's on-disk state. A Session-0 rendering failure is only
           # diagnosable by looking at screenshot_window.png.
           name: e2e-artifacts
+          path: ${{ runner.temp }}/kc-artifacts
+          if-no-files-found: warn
+
+  # =========================================================================
+  # Linux: the hub itself, serving a real browser.
+  #
+  # The Windows job above proves the browser transport. This one proves the HUB runs on
+  # Linux at all under load — its pipes become Unix domain sockets, its single-instance
+  # mutex becomes shared memory under the temp dir, and its Avalonia tray needs an X
+  # server. None of that is exercised anywhere else, and all of it is new.
+  #
+  # It runs the browser leg only. The rest of the suite installs a Velopack Setup.exe,
+  # drives the WPF adapter and builds a WinExe consumer — none of which exist here.
+  # =========================================================================
+  browser-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Cache NuGet
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', 'Directory.Build.props') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      # A self-contained publish carries the .NET runtime but NOT system libraries, and
+      # Avalonia's X11 backend dlopens the session-management pair during startup. Without
+      # them the hub dies with "Unable to load shared library 'libICE.so.6'" — which names
+      # a library, not a missing package. xvfb supplies the display it then needs.
+      - name: Install the hub's X11 dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libice6 libsm6 libx11-6 libxext6 libxrandr2 libxi6 libxcursor1 \
+            libfontconfig1 libgl1 xvfb
+
+      - name: Install the WebAssembly workload
+        run: dotnet workload install wasm-tools
+
+      # No Velopack here: vpk targets an installer format this job does not need, and the
+      # rig only requires the hub and the shim co-located in one directory.
+      - name: Publish the hub and the shim, co-located
+        run: |
+          dotnet publish Keincheck.Hub/Keincheck.Hub.csproj \
+            -c Release -r linux-x64 --self-contained true \
+            -p:Version=${{ env.KEINCHECK_CI_VERSION }} -o "$RUNNER_TEMP/kc-hub"
+          dotnet publish Keincheck.Connect/Keincheck.Connect.csproj \
+            -c Release -r linux-x64 -o "$RUNNER_TEMP/kc-shim"
+          cp "$RUNNER_TEMP/kc-shim/keincheck-connect" "$RUNNER_TEMP/kc-hub/"
+          chmod +x "$RUNNER_TEMP/kc-hub/Keincheck.Hub" "$RUNNER_TEMP/kc-hub/keincheck-connect"
+          echo "KEINCHECK_E2E_HUB_DIR=$RUNNER_TEMP/kc-hub" >> "$GITHUB_ENV"
+
+      - name: Publish the browser demo, enrolled against that hub
+        run: |
+          dotnet publish samples/Keincheck.Browser.Demo/Keincheck.Browser.Demo.csproj -c Release \
+            -p:KeincheckHubExe="$RUNNER_TEMP/kc-hub/Keincheck.Hub"
+          bundle="samples/Keincheck.Browser.Demo/bin/Release/net10.0-browser/browser-wasm/AppBundle"
+          test -f "$bundle/index.html" || { echo "no AppBundle at $bundle"; exit 1; }
+          echo "KEINCHECK_E2E_BROWSER_BUNDLE=$PWD/$bundle" >> "$GITHUB_ENV"
+
+      - name: Install the Playwright browser
+        run: |
+          # Built first: playwright.ps1 is emitted into the project's output by the package.
+          dotnet build tests/Keincheck.E2E/Keincheck.E2E.csproj -c Release
+          # --with-deps pulls the shared libraries headless Chromium needs; on a bare runner
+          # image it launches and immediately dies without them.
+          pwsh tests/Keincheck.E2E/bin/Release/net10.0/playwright.ps1 install chromium --with-deps
+
+      # xvfb-run wraps the WHOLE test run, not just the hub: the hub is an Avalonia tray
+      # app started by the rig as a child process, so it inherits this DISPLAY.
+      - name: Drive a browser against the hub
+        env:
+          KEINCHECK_E2E: '1'
+          KEINCHECK_E2E_ARTIFACTS: ${{ runner.temp }}/kc-artifacts
+        run: >
+          xvfb-run -a --server-args="-screen 0 1280x1024x24"
+          dotnet test tests/Keincheck.E2E/Keincheck.E2E.csproj -c Release --no-build
+          --filter "FullyQualifiedName~BrowserE2ETests"
+          --logger "trx;LogFileName=e2e-browser-linux.trx"
+          --results-directory ${{ runner.temp }}/kc-artifacts
+
+      - name: Show the hub log
+        if: failure()
+        run: |
+          log="$RUNNER_TEMP/kc-artifacts/hub.log"
+          if [ -f "$log" ]; then tail -200 "$log"; else echo "(no hub log)"; fi
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts-linux
           path: ${{ runner.temp }}/kc-artifacts
           if-no-files-found: warn

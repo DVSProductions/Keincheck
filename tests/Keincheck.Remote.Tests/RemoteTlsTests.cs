@@ -258,7 +258,15 @@ public sealed class RemoteTlsTests
             var ssl = new System.Net.Security.SslStream(tcp.GetStream(), false, (_, _, _, _) => true);
             await using (ssl)
             {
-                await Assert.ThrowsAnyAsync<Exception>(async () =>
+                // The client gets NOTHING, but how that looks is platform-specific: SChannel
+                // raises an alert the client sees as an exception, while OpenSSL closes the
+                // connection so the read completes with zero bytes. Asserting "the client
+                // throws" therefore passed on Windows and failed on Linux while the server
+                // behaved identically on both. What must hold everywhere is that no data ever
+                // comes back.
+                var handshakeFailed = false;
+                var bytesRead = -1;
+                try
                 {
                     await ssl.AuthenticateAsClientAsync(new System.Net.Security.SslClientAuthenticationOptions
                     {
@@ -267,15 +275,26 @@ public sealed class RemoteTlsTests
                     }, cts.Token);
                     // TLS 1.3 defers the client-certificate verdict, so force a round-trip.
                     await ssl.WriteAsync(new byte[] { 1 }, cts.Token);
-                    await ssl.ReadAsync(new byte[16], cts.Token);
-                });
+                    bytesRead = await ssl.ReadAsync(new byte[16], cts.Token);
+                }
+                catch
+                {
+                    handshakeFailed = true;
+                }
+
+                Assert.True(handshakeFailed || bytesRead == 0,
+                    $"an anonymous client got a usable session ({bytesRead} bytes read)");
             }
         }
         finally
         {
             listener.Stop();
-            try { await serverTask; } catch { /* expected */ }
         }
+
+        // THE security property, and the one that is identical on every platform: the server
+        // refused to establish a session. Asserted after the client half so a server that
+        // wrongly accepted is reported as such rather than as a client-side symptom.
+        await Assert.ThrowsAnyAsync<Exception>(() => serverTask);
     }
 
     [Fact]

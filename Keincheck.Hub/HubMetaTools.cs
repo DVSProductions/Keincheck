@@ -1271,13 +1271,7 @@ user declines or ignores it, note that in your own memory/notes and do not sugge
         // machine", so a purely local setup reads exactly as it did before. canLaunch is
         // surfaced so the model can see that hub_launch_client / hub_restart_client are not
         // available for a remote client BEFORE trying and getting an error.
-        transport = c.Transport switch
-        {
-            ClientTransport.Pipe => "pipe",
-            ClientTransport.Tcp => "tcp",
-            ClientTransport.Relay => "relay",
-            _ => "unknown",
-        },
+        transport = DescribeTransport(c.Transport),
         host = c.Host,
         canLaunch = c.CanLaunch,
     };
@@ -1438,4 +1432,23 @@ user declines or ignores it, note that in your own memory/notes and do not sugge
         JsonDocument.Parse(
             """{"type":"object","properties":{"tool":{"type":"string","description":"The client tool to call (see hub_list_client_tools)."},"args":{"type":"object","description":"The arguments to pass to the tool."},"client":{"type":"string","description":"Optional: target this client instead of the active one for this call."}},"required":["tool"]}""")
             .RootElement.Clone();
+
+    /// <summary>
+    /// The name a client's transport is reported under in the listing an AI reads.
+    /// </summary>
+    /// <remarks>
+    /// Not cosmetic: the model decides what it may do from this. "pipe" means the same machine,
+    /// anything else does not, and launch/restart are unavailable on some of them. A transport
+    /// that falls through to "unknown" tells it nothing — which is what a browser client did
+    /// after WebSocket was added to the enum and not to this mapping. Every member must be
+    /// named here; <c>ClientTransportNamingTests</c> fails if one is not.
+    /// </remarks>
+    internal static string DescribeTransport(ClientTransport transport) => transport switch
+    {
+        ClientTransport.Pipe => "pipe",
+        ClientTransport.Tcp => "tcp",
+        ClientTransport.Relay => "relay",
+        ClientTransport.WebSocket => "websocket",
+        _ => "unknown",
+    };
 }

@@ -120,13 +120,33 @@ public static class AgentMcpSetup
     /// <summary>The config file path for <paramref name="target"/> (the file may not exist yet).</summary>
     public static string TargetPath(AgentTarget target) => target switch
     {
-        AgentTarget.ClaudeDesktop => Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Claude", "claude_desktop_config.json"),
+        AgentTarget.ClaudeDesktop => ClaudeDesktopConfigPath(),
         AgentTarget.ClaudeCode => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude.json"),
         AgentTarget.KimiCode => KimiConfigPath(),
         _ => throw new ArgumentOutOfRangeException(nameof(target)),
     };
+
+    /// <summary>
+    /// Claude Desktop's per-user config: <c>%APPDATA%\Claude</c> on Windows,
+    /// <c>~/Library/Application Support/Claude</c> on macOS, <c>~/.config/Claude</c> on Linux.
+    /// </summary>
+    /// <remarks>
+    /// macOS needs its own branch: .NET maps <see cref="Environment.SpecialFolder.ApplicationData"/>
+    /// to <c>~/.config</c> there (the XDG convention), not to <c>~/Library/Application Support</c>
+    /// where a Mac app actually keeps its config — so the generic path would have written a
+    /// file Claude Desktop never reads.
+    /// </remarks>
+    private static string ClaudeDesktopConfigPath()
+    {
+        var dir = OperatingSystem.IsMacOS()
+            ? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "Library", "Application Support")
+            : Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+
+        return Path.Combine(dir, "Claude", "claude_desktop_config.json");
+    }
 
     /// <summary>
     /// Kimi Code's user-level MCP config: <c>$KIMI_CODE_HOME/mcp.json</c> when the override is

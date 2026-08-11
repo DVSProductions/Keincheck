@@ -1,0 +1,74 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="Keincheck.Browser.Demo.MainView"
+             x:Name="Root">
+
+  <!--
+    A validation surface, not a pretty app. Every control carries an x:Name so a selector can
+    address it, and each one exists to exercise a different tool: reading text, clicking,
+    typing, toggling, setting a property, and enumerating a collection. If an AI can drive all
+    of these from a browser, the transport works.
+  -->
+
+  <ScrollViewer>
+    <StackPanel Margin="24" Spacing="16" MaxWidth="640" HorizontalAlignment="Center">
+
+      <TextBlock x:Name="Title"
+                 Text="Keincheck browser demo"
+                 FontSize="24" FontWeight="SemiBold" />
+
+      <Border x:Name="StatusPanel"
+              Background="#20808080" CornerRadius="6" Padding="12">
+        <StackPanel Spacing="4">
+          <TextBlock Text="Hub attachment" FontWeight="SemiBold" />
+          <!-- Set from code-behind: says whether this build was enrolled, and against what. -->
+          <TextBlock x:Name="AttachStatus" Text="(unknown)" TextWrapping="Wrap" />
+        </StackPanel>
+      </Border>
+
+      <!-- get_text / click_at / automation_action -->
+      <StackPanel Spacing="8">
+        <TextBlock Text="Counter" FontWeight="SemiBold" />
+        <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+          <Button x:Name="IncrementButton" Content="Increment" />
+          <Button x:Name="ResetButton" Content="Reset" />
+          <TextBlock x:Name="CounterText" Text="0" FontSize="20" VerticalAlignment="Center" />
+        </StackPanel>
+      </StackPanel>
+
+      <!-- type_text / set_focus -->
+      <StackPanel Spacing="8">
+        <TextBlock Text="Text entry" FontWeight="SemiBold" />
+        <TextBox x:Name="NameBox" PlaceholderText="Type something here" />
+        <TextBlock x:Name="EchoText" Text="(nothing typed yet)" Foreground="#808080" />
+      </StackPanel>
+
+      <!-- set_property on a bool -->
+      <StackPanel Spacing="8">
+        <TextBlock Text="Toggle" FontWeight="SemiBold" />
+        <CheckBox x:Name="EnabledCheck" Content="Enabled" />
+        <ToggleSwitch x:Name="ModeSwitch" OnContent="On" OffContent="Off" />
+      </StackPanel>
+
+      <!-- set_property on a double -->
+      <StackPanel Spacing="8">
+        <TextBlock Text="Slider" FontWeight="SemiBold" />
+        <Slider x:Name="LevelSlider" Minimum="0" Maximum="100" Value="25" />
+        <TextBlock x:Name="LevelText" Text="25" />
+      </StackPanel>
+
+      <!-- query_controls / selection -->
+      <StackPanel Spacing="8">
+        <TextBlock Text="List" FontWeight="SemiBold" />
+        <ListBox x:Name="ItemList" Height="120">
+          <ListBoxItem x:Name="ItemAlpha" Content="Alpha" />
+          <ListBoxItem x:Name="ItemBravo" Content="Bravo" />
+          <ListBoxItem x:Name="ItemCharlie" Content="Charlie" />
+          <ListBoxItem x:Name="ItemDelta" Content="Delta" />
+        </ListBox>
+        <TextBlock x:Name="SelectionText" Text="(nothing selected)" Foreground="#808080" />
+      </StackPanel>
+
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

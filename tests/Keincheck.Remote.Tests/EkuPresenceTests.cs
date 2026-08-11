@@ -125,15 +125,28 @@ public sealed class EkuPresenceTests
 
             var endpoint = new RemoteEndpoint { Host = "127.0.0.1", Port = port };
 
-            await Assert.ThrowsAnyAsync<Exception>(async () =>
+            // The client gets no session, but the shape of that differs by TLS stack: SChannel
+            // raises an alert the client sees as an exception, while OpenSSL simply closes the
+            // connection, so the forced read completes with a clean EOF (a null envelope).
+            // Asserting "the client throws" therefore passed on Windows and failed on Linux
+            // while the server behaved identically on both.
+            var refused = false;
+            try
             {
                 await using var channel = await StreamTransport.ConnectAsync(
                     endpoint, credential, TimeSpan.FromSeconds(10), cts.Token);
-                // A refused client certificate can surface either at the handshake or on the
-                // first read, depending on when SChannel reports the alert, so force a read.
-                await channel.ReceiveAsync(cts.Token);
-            });
+                // A refused client certificate can surface at the handshake or on the first
+                // read, depending on when the stack reports the alert, so force a read.
+                refused = await channel.ReceiveAsync(cts.Token) is null;
+            }
+            catch
+            {
+                refused = true;
+            }
 
+            Assert.True(refused, "an EKU-less leaf established a usable session");
+
+            // THE security property, identical on every platform: the server refused.
             await Assert.ThrowsAnyAsync<Exception>(() => accept);
         }
         finally

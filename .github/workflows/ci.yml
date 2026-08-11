@@ -20,8 +20,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The full solution, including the WPF adapter and its demo. Windows-only because
+  # Keincheck.Wpf is net8.0-windows + UseWPF.
   build-test:
-    runs-on: windows-latest   # Keincheck.Wpf is net8.0-windows + UseWPF, so the solution is Windows-only
+    runs-on: windows-latest
     timeout-minutes: 20
 
     steps:
@@ -57,5 +59,66 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-results
+          path: ${{ runner.temp }}/test-results
+          if-no-files-found: warn
+
+  # Everything except the WPF adapter and its demo, on the other two shipping platforms.
+  #
+  # Keincheck.CrossPlatform.slnf is the same solution minus Keincheck.Wpf and
+  # samples/Keincheck.Wpf.Demo — the only two projects that are net8.0-windows. Keeping the
+  # filter in the repo (rather than listing projects here) means one place to update when a
+  # project is added, and `dotnet build Keincheck.CrossPlatform.slnf` reproduces this job
+  # locally.
+  #
+  # The UI tests run on Avalonia.Headless, so no display server or xvfb is needed.
+  build-test-unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Restore
+        run: dotnet restore Keincheck.CrossPlatform.slnf
+
+      - name: Build
+        run: dotnet build Keincheck.CrossPlatform.slnf -c Release --no-restore
+
+      - name: Test
+        run: >
+          dotnet test Keincheck.CrossPlatform.slnf -c Release --no-build
+          --filter "Category!=E2E"
+          --logger "trx;LogFileName=results.trx"
+          --results-directory ${{ runner.temp }}/test-results
+
+      # The hub is what ships on these platforms, and a plain `dotnet build` does not
+      # exercise the publish path (RID-specific assets, the self-contained apphost, R2R
+      # cross-compilation). Releasing is the wrong place to discover that broke.
+      - name: Verify the hub publishes for this platform
+        shell: bash
+        run: |
+          # tr, not ${VAR,,}: the macOS runners still ship bash 3.2, which has no case
+          # expansion, and the step would die on a syntax error rather than a publish error.
+          arch=$(echo "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')
+          if [ "$RUNNER_OS" = "macOS" ]; then rid="osx-$arch"; else rid="linux-$arch"; fi
+          dotnet publish Keincheck.Hub/Keincheck.Hub.csproj \
+            -c Release -r "$rid" --self-contained true -o "$RUNNER_TEMP/publish-$rid"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
           path: ${{ runner.temp }}/test-results
           if-no-files-found: warn

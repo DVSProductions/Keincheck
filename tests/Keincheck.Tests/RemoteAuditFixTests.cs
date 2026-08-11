@@ -29,12 +29,26 @@ public sealed class RemoteAuditFixTests
             new PipeChannel(new Duplex(a.Reader.AsStream(), b.Writer.AsStream())));
     }
 
-    private static PipeClientBroker NewBroker(KnownClientStore? store = null) => new(
+    /// <summary>Pids the stub starter was asked to produce, so a launch can be observed.</summary>
+    private readonly List<string> _launched = [];
+
+    private PipeClientBroker NewBroker(KnownClientStore? store = null) => new(
         new BrokerOptions
         {
             WatchdogInterval = TimeSpan.FromHours(1),
             HeartbeatTimeout = TimeSpan.FromMinutes(5),
             InvokeTimeout = TimeSpan.FromSeconds(2),
+            // A stub starter, so a test that reaches the launch path records the attempt
+            // instead of starting a real process. Without it these tests only avoided
+            // spawning something because process introspection happened to fail: a client
+            // registers no pid, so the broker looks up pid 0, which Windows refuses and
+            // Linux resolves -- and on Linux the launch went through and started the test
+            // host itself.
+            ProcessStarter = psi =>
+            {
+                _launched.Add(psi.FileName);
+                return 4242;
+            },
         },
         store ?? KnownClientStore.Open(Path.Combine(Path.GetTempPath(), $"kc-fix-{Guid.NewGuid():N}.json")));
 
@@ -237,11 +251,16 @@ public sealed class RemoteAuditFixTests
         await using var local = await ConnectAsync(broker, "myapp", ClientSessionContext.LocalPipe);
         await using var remote = await ConnectAsync(broker, "myapp", Remote);
 
-        // Reaches the profile lookup (and fails there for want of a path) rather than being
-        // refused as remote.
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => broker.LaunchClientAsync("myapp"));
-        Assert.DoesNotContain("cannot start or stop processes", ex.Message);
+        // Reaches the profile lookup rather than being refused as remote. Whether it then
+        // succeeds or fails for want of a path depends on whether the local client's pid
+        // resolves to an executable, which is platform-specific -- so what is asserted is the
+        // property this test is actually about: it was not turned away for being remote.
+        var ex = await Record.ExceptionAsync(() => broker.LaunchClientAsync("myapp"));
+
+        if (ex is not null)
+            Assert.DoesNotContain("cannot start or stop processes", ex.Message);
+        else
+            Assert.NotEmpty(_launched); // it really went through to a launch
     }
 
     [Theory]

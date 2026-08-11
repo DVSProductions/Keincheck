@@ -32,4 +32,13 @@
     <ProjectReference Include="..\Keincheck.Protocol\Keincheck.Protocol.csproj" />
   </ItemGroup>
 
+  <!--
+    Ships the optional build-time WebSocket enrollment, which binds a browser app to one hub at
+    compile time. OFF unless a consuming project sets KeincheckWebSocketEnroll=true, so merely
+    installing this package never makes a build contact anything.
+  -->
+  <ItemGroup>
+    <None Include="build\Keincheck.Client.targets" Pack="true" PackagePath="build\" />
+  </ItemGroup>
+
 </Project>

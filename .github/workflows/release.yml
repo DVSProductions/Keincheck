@@ -1,8 +1,19 @@
 name: Release
 
-# Push a semver tag (e.g. v0.2.0) to build and publish a Velopack release to
-# GitHub. vpk creates the GitHub release, uploads the installer + update packages,
-# and (given a prior release) generates delta packages.
+# Push a semver tag (e.g. v0.2.0) to build and publish Velopack releases to GitHub for
+# Windows, Linux and macOS. vpk creates the GitHub release, uploads the installer + update
+# packages, and (given a prior release) generates delta packages.
+#
+# The three platform jobs run in sequence rather than in parallel, and that is deliberate:
+# they all upload into ONE GitHub release. Windows goes first and creates it; the others
+# pass --merge to add their assets to the release that already exists. Run concurrently,
+# two jobs can race to create the same release and one of them loses with a 422. A release
+# takes minutes, not hours, so serialising is the cheap fix.
+#
+# Each platform gets its own Velopack CHANNEL, which is what keeps their update feeds
+# separate — a Linux install must never be offered a win-x64 package. Windows keeps
+# Velopack's default channel ("win") unchanged: renaming it would orphan every existing
+# install's update feed.
 on:
   push:
     tags:
@@ -12,11 +23,14 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  # ---------------------------------------------------------------- Windows (win-x64)
+  windows:
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
     steps:
-      # Full history, not the default shallow clone: the release-notes step below reads
-      # the previous tag and the commit log between the two.
+      # Full history, not the default shallow clone: the release-notes job reads the
+      # previous tag and the commit log between the two.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -73,14 +87,163 @@ jobs:
           --tag ${{ github.ref_name }}
           --token ${{ secrets.GITHUB_TOKEN }}
 
-      # vpk publishes the release with an empty body, so every release page used to say
-      # nothing about what changed. Runs after the upload because it edits the release
-      # vpk just created.
-      #
-      # GitHub's generate-notes is preferred — it credits each merged PR and its author —
-      # but it lists ONLY merged pull requests, so it returns an empty section for work
-      # that landed as direct commits on main. Most of this project's history is exactly
-      # that, hence the commit-log fallback.
+  # ------------------------------------------------------------------ Linux (linux-x64)
+  linux:
+    needs: windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      # Native AOT on Linux shells out to clang and links against zlib; neither is
+      # guaranteed present on the runner image, and without them the shim publish fails
+      # with a link error rather than anything that names the missing package.
+      - name: Install Native AOT prerequisites
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+      - name: Install vpk
+        run: dotnet tool install -g vpk
+
+      - name: Publish Hub (self-contained, linux-x64)
+        run: >
+          dotnet publish Keincheck.Hub/Keincheck.Hub.csproj
+          -c Release -r linux-x64 --self-contained true -p:PublishReadyToRun=true
+          -p:Version=${{ needs.windows.outputs.version }} -o publish
+
+      - name: Publish the shim (Native AOT) and co-locate it with the hub
+        run: |
+          dotnet publish Keincheck.Connect/Keincheck.Connect.csproj -c Release -r linux-x64 -o publish-shim
+          cp publish-shim/keincheck-connect publish/
+          chmod +x publish/keincheck-connect publish/Keincheck.Hub
+
+      - name: Download prior releases (for delta packages)
+        continue-on-error: true
+        run: >
+          vpk download github --channel linux
+          --repoUrl https://github.com/${{ github.repository }} --token ${{ secrets.GITHUB_TOKEN }}
+
+      # The Linux target builds an AppImage. --icon must be a PNG here (the .ico used for
+      # Windows is not a format the freedesktop icon spec accepts), and the entry point has
+      # no extension.
+      - name: Pack
+        run: >
+          vpk pack --channel linux -u Keincheck.Hub -v ${{ needs.windows.outputs.version }}
+          -p publish -e Keincheck.Hub
+          --icon assets/icon.png
+          --packTitle "Keincheck Hub" --packAuthors "Valentino Saitz"
+
+      - name: Upload to GitHub release
+        run: >
+          vpk upload github --channel linux
+          --repoUrl https://github.com/${{ github.repository }}
+          --publish --merge
+          --releaseName "Keincheck Hub ${{ needs.windows.outputs.version }}"
+          --tag ${{ github.ref_name }}
+          --token ${{ secrets.GITHUB_TOKEN }}
+
+  # ------------------------------------------------------- macOS (osx-arm64, osx-x64)
+  #
+  # This job MUST run on a macOS host, and not because vpk needs one. Apple Silicon
+  # refuses to execute an arm64 binary carrying no signature at all, and the ad-hoc
+  # signature that satisfies that requirement is applied by the .NET SDK only when the
+  # publish itself runs on macOS. A cross-published osx-arm64 build is an app that cannot
+  # start.
+  #
+  # These builds are ad-hoc signed but NOT notarized (that needs a paid Apple Developer ID).
+  # They run fine; the first launch shows Gatekeeper's "cannot be opened because Apple
+  # cannot check it for malicious software", and the user clears it once via
+  # System Settings > Privacy & Security > Open Anyway. See README.
+  macos:
+    needs: [windows, linux]
+    runs-on: macos-latest
+    strategy:
+      # Same reason as the job ordering: two arch packs uploading into one GitHub release.
+      max-parallel: 1
+      matrix:
+        rid: [osx-arm64, osx-x64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Install vpk
+        run: dotnet tool install -g vpk
+
+      # macOS wants an .icns for the .app bundle icon, and the repo carries a 256x256 PNG.
+      # sips + iconutil are both part of the base OS, so this needs no extra tooling.
+      - name: Build the .icns app icon from assets/icon.png
+        run: |
+          mkdir -p icon.iconset
+          for size in 16 32 128 256 512; do
+            sips -z $size $size assets/icon.png --out "icon.iconset/icon_${size}x${size}.png"
+            sips -z $((size * 2)) $((size * 2)) assets/icon.png --out "icon.iconset/icon_${size}x${size}@2x.png"
+          done
+          iconutil -c icns icon.iconset -o icon.icns
+
+      - name: Publish Hub (self-contained, ${{ matrix.rid }})
+        run: >
+          dotnet publish Keincheck.Hub/Keincheck.Hub.csproj
+          -c Release -r ${{ matrix.rid }} --self-contained true -p:PublishReadyToRun=true
+          -p:Version=${{ needs.windows.outputs.version }} -o publish
+
+      - name: Publish the shim (Native AOT) and co-locate it with the hub
+        run: |
+          dotnet publish Keincheck.Connect/Keincheck.Connect.csproj -c Release -r ${{ matrix.rid }} -o publish-shim
+          cp publish-shim/keincheck-connect publish/
+          chmod +x publish/keincheck-connect publish/Keincheck.Hub
+
+      - name: Download prior releases (for delta packages)
+        continue-on-error: true
+        run: >
+          vpk download github --channel ${{ matrix.rid }}
+          --repoUrl https://github.com/${{ github.repository }} --token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pack
+        run: >
+          vpk pack --channel ${{ matrix.rid }} -u Keincheck.Hub -v ${{ needs.windows.outputs.version }}
+          -p publish -e Keincheck.Hub
+          --icon icon.icns
+          --packTitle "Keincheck Hub" --packAuthors "Valentino Saitz"
+
+      - name: Upload to GitHub release
+        run: >
+          vpk upload github --channel ${{ matrix.rid }}
+          --repoUrl https://github.com/${{ github.repository }}
+          --publish --merge
+          --releaseName "Keincheck Hub ${{ needs.windows.outputs.version }}"
+          --tag ${{ github.ref_name }}
+          --token ${{ secrets.GITHUB_TOKEN }}
+
+  # ----------------------------------------------------------------------- release notes
+  #
+  # vpk publishes the release with an empty body, so every release page used to say nothing
+  # about what changed. Runs last because it edits the release the platform jobs created,
+  # and because a body written before the final upload would be the only thing on the page
+  # if a later job failed.
+  #
+  # GitHub's generate-notes is preferred — it credits each merged PR and its author — but it
+  # lists ONLY merged pull requests, so it returns an empty section for work that landed as
+  # direct commits on main. Most of this project's history is exactly that, hence the
+  # commit-log fallback.
+  notes:
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Write release notes
         shell: bash
         env:
@@ -104,5 +267,23 @@ jobs:
               fi
             } > notes.md
           fi
+
+          cat >> notes.md <<'EOF'
+
+          ---
+
+          ### Installing
+
+          | Platform | Asset |
+          |---|---|
+          | Windows | `Keincheck.Hub-win-Setup.exe` |
+          | Linux (x64) | `Keincheck.Hub-linux-*.AppImage` — `chmod +x` it and run |
+          | macOS (Apple Silicon) | `Keincheck.Hub-osx-arm64-*` |
+          | macOS (Intel) | `Keincheck.Hub-osx-x64-*` |
+
+          The macOS builds are ad-hoc signed but **not notarized**. macOS will refuse the first
+          launch with "cannot be opened because Apple cannot check it for malicious software";
+          clear it once via **System Settings → Privacy & Security → Open Anyway**.
+          EOF
 
           gh release edit "$TAG" --notes-file notes.md
