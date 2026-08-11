@@ -2,8 +2,11 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Templates;
 using Avalonia.Data;
+using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Threading;
+using Avalonia.VisualTree;
 
 namespace Keincheck.Hub;
 
@@ -25,7 +28,10 @@ public sealed class HubWindow : Window
         Title = $"Keincheck Hub {VersionLabel()}";
         Icon = LoadWindowIcon();
         Width = 640;
-        Height = 520;
+        // Taller than the old 520: with the audit pane now sharing the window rather than
+        // owning a fixed 160px, the default should show a useful amount of both panes before
+        // anyone has to drag anything.
+        Height = 620;
         MinWidth = 480;
         MinHeight = 360;
 
@@ -54,10 +60,21 @@ public sealed class HubWindow : Window
 
     private Control BuildLayout()
     {
+        // Star-sized rows either side of a splitter, rather than the audit log's old fixed
+        // 160px. A pixel height cannot be dragged, so the log was stuck at four or five visible
+        // lines however tall the window got -- and the audit log is the one thing here you
+        // actually want to make bigger. MinHeight on both keeps a drag from collapsing either
+        // pane to nothing, which is easy to do by accident and awkward to undo.
         var root = new Grid
         {
             Margin = new Thickness(12),
-            RowDefinitions = new RowDefinitions("Auto,*,Auto,160"),
+            RowDefinitions =
+            [
+                new RowDefinition(GridLength.Auto),                        // banner
+                new RowDefinition(new GridLength(2, GridUnitType.Star)) { MinHeight = 80 },  // clients
+                new RowDefinition(GridLength.Auto),                        // splitter
+                new RowDefinition(new GridLength(1, GridUnitType.Star)) { MinHeight = 90 },  // audit
+            ],
         };
 
         // --- driving banner -------------------------------------------------
@@ -86,11 +103,54 @@ public sealed class HubWindow : Window
         Grid.SetRow(list, 1);
         root.Children.Add(list);
 
+        // --- splitter -------------------------------------------------------
+        // Visibly a handle, not just a hit-target. A transparent splitter resizes perfectly well
+        // and tells nobody it is there -- and "I can't make the log bigger" is a discoverability
+        // complaint as much as a layout one. The grab area is 8px for the pointer; the drawn
+        // line is 2px so it reads as a divider rather than a chunk of chrome.
+        var splitter = new GridSplitter
+        {
+            ResizeDirection = GridResizeDirection.Rows,
+            Height = 8,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Margin = new Thickness(0, 6, 0, 0),
+            Cursor = new Cursor(StandardCursorType.SizeNorthSouth),
+            Background = Brushes.Transparent, // the whole 8px is grabbable, not just the line
+        };
+        ToolTip.SetTip(splitter, "Drag to resize the audit log");
+
+        // The line is drawn by a Border sharing the row, not by the splitter. Setting the
+        // splitter's own Background did not render, and replacing its Template would put its
+        // drag behaviour at risk -- so the two concerns are simply separated: the Border is
+        // what you see, the splitter (on top, transparent) is what you grab.
+        var divider = new Border
+        {
+            Height = 2,
+            CornerRadius = new CornerRadius(1),
+            Background = new SolidColorBrush(Color.FromRgb(0x50, 0x50, 0x50)),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 6, 0, 0),
+            IsHitTestVisible = false, // never steal the drag from the splitter above it
+        };
+        Grid.SetRow(divider, 2);
+        root.Children.Add(divider);
+
+        Grid.SetRow(splitter, 2);
+        root.Children.Add(splitter);
+
+        // --- audit pane (header + log, sized together) ----------------------
+        // Header and log share one star row so the splitter has exactly two panes to move
+        // between. With the header in its own Auto row the splitter's neighbour would have
+        // been that header, which cannot resize, and the drag would do nothing.
+        var auditPane = new Grid { RowDefinitions = new RowDefinitions("Auto,*") };
+        Grid.SetRow(auditPane, 3);
+        root.Children.Add(auditPane);
+
         // --- audit header (+ hub version on the right) ----------------------
         var auditHeader = new Grid
         {
             ColumnDefinitions = new ColumnDefinitions("*,Auto"),
-            Margin = new Thickness(2, 12, 0, 4),
+            Margin = new Thickness(2, 6, 0, 4),
         };
         auditHeader.Children.Add(new TextBlock
         {
@@ -107,8 +167,8 @@ public sealed class HubWindow : Window
         };
         Grid.SetColumn(version, 1);
         auditHeader.Children.Add(version);
-        Grid.SetRow(auditHeader, 2);
-        root.Children.Add(auditHeader);
+        Grid.SetRow(auditHeader, 0);
+        auditPane.Children.Add(auditHeader);
 
         // --- audit log ------------------------------------------------------
         var audit = new ListBox
@@ -124,11 +184,72 @@ public sealed class HubWindow : Window
             CornerRadius = new CornerRadius(4),
             Child = audit,
         };
-        Grid.SetRow(auditScroll, 3);
-        root.Children.Add(auditScroll);
+        Grid.SetRow(auditScroll, 1);
+        auditPane.Children.Add(auditScroll);
+
+        KeepAuditScrolled(audit, _vm.Audit);
 
         return root;
     }
+
+    /// <summary>
+    /// Follows the newest audit entry, but only while the view is already at the bottom.
+    /// </summary>
+    /// <remarks>
+    /// The log appends and never stops, so without this it sat on the first few entries and
+    /// every new tool call went out of sight. Following unconditionally is the other failure:
+    /// it would yank the view away the moment you scrolled up to read what an agent just did,
+    /// which is precisely when the log matters. So it follows from the bottom and gets out of
+    /// the way as soon as you scroll off it -- and resumes when you scroll back down.
+    /// </remarks>
+    /// <param name="entries">
+    /// The collection itself, NOT <c>audit.ItemsSource</c>. The binding has not been evaluated
+    /// while the layout is being built, so ItemsSource is still null here — reading it silently
+    /// subscribed to nothing and the log never followed at all.
+    /// </param>
+    private static void KeepAuditScrolled(ListBox audit, System.Collections.ObjectModel.ObservableCollection<string> entries)
+    {
+        entries.CollectionChanged += (_, e) =>
+        {
+            if (e.Action is not System.Collections.Specialized.NotifyCollectionChangedAction.Add)
+                return;
+
+            if (entries.Count == 0)
+                return;
+
+            // Measured BEFORE the new row is laid out: once the extent grows, the old offset
+            // would no longer look like "at the bottom" and following would stop after one row.
+            var scroll = ScrollerOf(audit);
+
+            // No ScrollViewer yet means the list has not been rendered, so there is nothing to
+            // scroll away from and following is unambiguously right.
+            if (scroll is not null && !IsAtBottom(scroll))
+                return;
+
+            // Posted, not called inline: the item is in the collection before a container for
+            // it exists, so acting now would scroll to where the list used to end. And the
+            // offset is set directly rather than via ScrollIntoView, which does not move a
+            // virtualized ListBox whose target container has not been realized -- the reason
+            // the log still sat on its first entries after the first attempt at this.
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (ScrollerOf(audit) is { } sv)
+                    sv.Offset = new Vector(sv.Offset.X, sv.Extent.Height);
+            }, DispatcherPriority.Background);
+        };
+    }
+
+    /// <summary>
+    /// Whether the view is parked at the bottom. The tolerance is one row's worth: a list
+    /// scrolled to the end can sit a fraction of a pixel short of its extent, and an exact
+    /// comparison would read that as "the user scrolled up" and stop following forever.
+    /// </summary>
+    private static bool IsAtBottom(ScrollViewer scroll) =>
+        scroll.Offset.Y >= scroll.Extent.Height - scroll.Viewport.Height - 24;
+
+    /// <summary>The list's own ScrollViewer, or null before it has been rendered.</summary>
+    private static ScrollViewer? ScrollerOf(ListBox list) =>
+        list.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault();
 
     // ---------------------------------------------------------------- remote panel
 
