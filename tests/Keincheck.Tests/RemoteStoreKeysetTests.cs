@@ -18,14 +18,16 @@ namespace Keincheck.Tests;
 /// intermittently returns a certificate whose key-provider info names a key container that was
 /// never written: no key file appears, <c>CngKey.Exists</c> says false, and the condition is
 /// permanent for that instance while re-importing the same bytes works. Measured at roughly
-/// 0.2% of imports single-threaded and up to 1% under concurrency. The hub imports its CA
-/// exactly once and keeps it for the life of the process, so one unlucky import turns into
-/// "every credential fails until the hub restarts" -- which is exactly what was seen.
+/// 0.1-0.5% of imports, arriving in bursts spread over wall time rather than per import. The hub
+/// imports its CA exactly once and keeps it for the life of the process, so one unlucky import
+/// turns into "every credential fails until the hub restarts" -- which is exactly what was seen.
 /// </para>
 /// <para>
-/// A single Provision-then-Issue therefore only fails by chance; this test runs enough of them
-/// in parallel that the unfixed loader fails almost every run on an affected machine, while
-/// the fixed loader (which verifies the key is reachable before handing the certificate out and
+/// A single Provision-then-Issue therefore only fails by chance, and because the failures come
+/// per unit of wall time this four-second run catches one only now and then: on the affected
+/// machine the unfixed loader failed 3 of 15 runs. It is a smoke test of the real path, not the
+/// regression proof; that is RemoteCertificatesLoadTests, which fabricates the failure on demand.
+/// The fixed loader (which verifies the key is reachable before handing the certificate out and
 /// re-imports otherwise) passes deterministically.
 /// </para>
 /// </remarks>

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Keincheck.Remote;
@@ -74,6 +75,26 @@ public sealed class RemoteCertificatesLoadTests
         Assert.All(handedOut, c => Assert.Throws<CryptographicException>(() => c.RawData));
         Assert.NotNull(ex.InnerException);
         Assert.Contains("private key", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Failed_Attempts_Are_Spaced_Out_So_The_Retries_Reach_Past_A_Burst()
+    {
+        // The platform failures arrive in bursts, so five back-to-back imports could all land in
+        // one. Every failed attempt is followed by a pause that doubles: 50 ms and then 100 ms
+        // for three attempts, none after the last.
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        var pfx = ClientPfx();
+        var sw = Stopwatch.StartNew();
+        Assert.Throws<CryptographicException>(() => RemoteCertificates.LoadVerified(
+            () => WithVanishedKeyContainer(RemoteCertificates.Load(pfx, Password)), attempts: 3));
+        sw.Stop();
+
+        var pauses = RemoteCertificates.AttemptPause * 3;
+        Assert.True(sw.Elapsed >= pauses - TimeSpan.FromMilliseconds(20),
+            $"three failed attempts took {sw.ElapsedMilliseconds} ms; the pauses alone should be {pauses.TotalMilliseconds} ms");
     }
 
     [Fact]

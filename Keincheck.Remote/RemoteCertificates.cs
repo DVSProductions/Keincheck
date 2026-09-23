@@ -313,7 +313,7 @@ public static class RemoteCertificates
     /// The returned certificate's private key has been opened and used once, so a Windows
     /// import that reported success without persisting the key (see the type remarks) is
     /// caught here rather than on the first signature or handshake. Such an import is
-    /// discarded and repeated, up to <see cref="LoadAttempts"/> times.
+    /// discarded and repeated after a short pause, up to <see cref="LoadAttempts"/> times.
     /// </para>
     /// </remarks>
     /// <exception cref="CryptographicException">
@@ -327,11 +327,23 @@ public static class RemoteCertificates
 
     /// <summary>How many imports <see cref="Load"/> tries before giving up.</summary>
     /// <remarks>
-    /// The measured failure rate is roughly 0.2% of imports single-threaded and about 1% under
-    /// concurrency, and each attempt is independent, so five attempts put the chance of
-    /// handing out an unusable key well below one in a billion.
+    /// Measured on the affected machine (Windows 11 26200, .NET 8 and 10) with a bare import loop
+    /// that disposes nothing: between none and seven imports in 1500 come back dead, the count grows
+    /// with wall time rather than with the number of imports (a run with pauses between imports
+    /// loses the same number per minute), and the failures arrive in bursts a fraction of a second to
+    /// a couple of seconds long, with consecutive dead imports half a second apart seen repeatedly.
+    /// So the attempts are not independent. An immediate re-import was alive in seven of eight
+    /// measured bursts and needed one more in the eighth, which makes five attempts generous, and
+    /// each failed attempt is followed by <see cref="AttemptPause"/>, doubling every time (750 ms
+    /// in total), so the later attempts reach past a burst instead of landing inside it.
     /// </remarks>
     internal const int LoadAttempts = 5;
+
+    /// <summary>
+    /// The pause after the first failed attempt; every further one doubles it. Only a failed
+    /// attempt pays it, so a healthy import costs nothing extra.
+    /// </summary>
+    internal static readonly TimeSpan AttemptPause = TimeSpan.FromMilliseconds(50);
 
     private static X509Certificate2 Import(byte[] pkcs12, string password)
     {
@@ -361,6 +373,9 @@ public static class RemoteCertificates
             // never written that is a no-op, and when it was, nothing else refers to it.
             certificate.Dispose();
             last = failure;
+
+            if (attempt < attempts)
+                Thread.Sleep(AttemptPause * (1 << (attempt - 1)));
         }
 
         throw new CryptographicException(
