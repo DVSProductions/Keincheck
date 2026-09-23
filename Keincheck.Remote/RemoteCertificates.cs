@@ -20,6 +20,14 @@ namespace Keincheck.Remote;
 ///   <see cref="X509KeyStorageFlags.UserKeySet"/>, which writes a key container that is
 ///   released when the certificate is disposed — so callers must load a credential
 ///   <b>once</b> and reuse it, never per reconnect.</item>
+///   <item><b>The import can silently lose the key.</b> On Windows 11 (build 26200)
+///   <c>PFXImportCertStore</c> intermittently returns a certificate whose key-provider info
+///   names a container it never wrote: no key file exists, and the first use of the key
+///   fails with NTE_BAD_KEYSET ("Keyset does not exist"). The condition is permanent for
+///   that instance while importing the same bytes again works. Because the hub imports its
+///   CA once and keeps it for the life of the process, one such import meant every
+///   credential request failed until a restart. <see cref="Load"/> therefore proves the key
+///   is reachable before handing the certificate out and imports again if it is not.</item>
 ///   <item><b>A leaf cannot predate its issuer.</b>
 ///   <c>CertificateRequest.Create(issuer, notBefore, ...)</c> throws
 ///   <see cref="ArgumentException"/> if <c>notBefore</c> is earlier than the issuer's, so
@@ -297,16 +305,124 @@ public static class RemoteCertificates
     /// Loads a PKCS#12 blob into a certificate usable for TLS.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// <b>Dispose the result</b>, and load it once rather than per connection: the flags
     /// required for SChannel write a key container that is only released on disposal.
+    /// </para>
+    /// <para>
+    /// The returned certificate's private key has been opened and used once, so a Windows
+    /// import that reported success without persisting the key (see the type remarks) is
+    /// caught here rather than on the first signature or handshake. Such an import is
+    /// discarded and repeated after a short pause, up to <see cref="LoadAttempts"/> times.
+    /// </para>
     /// </remarks>
+    /// <exception cref="CryptographicException">
+    /// The blob or password is wrong, or every attempt produced an unusable key.
+    /// </exception>
     public static X509Certificate2 Load(byte[] pkcs12, string password)
     {
         ArgumentNullException.ThrowIfNull(pkcs12);
+        return LoadVerified(() => Import(pkcs12, password));
+    }
+
+    /// <summary>How many imports <see cref="Load"/> tries before giving up.</summary>
+    /// <remarks>
+    /// Measured on the affected machine (Windows 11 26200, .NET 8 and 10) with a bare import loop
+    /// that disposes nothing: between none and seven imports in 1500 come back dead, the count grows
+    /// with wall time rather than with the number of imports (a run with pauses between imports
+    /// loses the same number per minute), and the failures arrive in bursts a fraction of a second to
+    /// a couple of seconds long, with consecutive dead imports half a second apart seen repeatedly.
+    /// So the attempts are not independent. An immediate re-import was alive in seven of eight
+    /// measured bursts and needed one more in the eighth, which makes five attempts generous, and
+    /// each failed attempt is followed by <see cref="AttemptPause"/>, doubling every time (750 ms
+    /// in total), so the later attempts reach past a burst instead of landing inside it.
+    /// </remarks>
+    internal const int LoadAttempts = 5;
+
+    /// <summary>
+    /// The pause after the first failed attempt; every further one doubles it. Only a failed
+    /// attempt pays it, so a healthy import costs nothing extra.
+    /// </summary>
+    internal static readonly TimeSpan AttemptPause = TimeSpan.FromMilliseconds(50);
+
+    private static X509Certificate2 Import(byte[] pkcs12, string password)
+    {
 #pragma warning disable SYSLIB0057 // X509CertificateLoader is net9+; this assembly targets net8.0.
         return new X509Certificate2(pkcs12, password, LoadFlags);
 #pragma warning restore SYSLIB0057
     }
+
+    /// <summary>
+    /// Runs <paramref name="import"/> until it yields a certificate whose private key can be
+    /// used, disposing every rejected instance. Internal so the tests can drive it with an
+    /// importer that reproduces the platform failure on demand.
+    /// </summary>
+    internal static X509Certificate2 LoadVerified(Func<X509Certificate2> import, int attempts = LoadAttempts)
+    {
+        ArgumentNullException.ThrowIfNull(import);
+        ArgumentOutOfRangeException.ThrowIfLessThan(attempts, 1);
+
+        CryptographicException? last = null;
+        for (var attempt = 1; attempt <= attempts; attempt++)
+        {
+            var certificate = import();
+            if (PrivateKeyIsUsable(certificate, out var failure))
+                return certificate;
+
+            // Disposal deletes the key container the certificate names; when the container was
+            // never written that is a no-op, and when it was, nothing else refers to it.
+            certificate.Dispose();
+            last = failure;
+
+            if (attempt < attempts)
+                Thread.Sleep(AttemptPause * (1 << (attempt - 1)));
+        }
+
+        throw new CryptographicException(
+            $"The certificate's private key could not be used after {attempts} imports; the key " +
+            "store did not persist it (NTE_BAD_KEYSET). Retry, and if it keeps failing check the " +
+            "user's key store under %APPDATA%\\Microsoft\\Crypto\\Keys.", last);
+    }
+
+    /// <summary>
+    /// Proves the private key behind a freshly imported certificate exists by signing with it.
+    /// A certificate without a private key passes: there is nothing to verify.
+    /// </summary>
+    private static bool PrivateKeyIsUsable(X509Certificate2 certificate, out CryptographicException? failure)
+    {
+        failure = null;
+        if (!certificate.HasPrivateKey)
+            return true;
+
+        // The private key is what fails to open, and it opens on the same call that
+        // creates the algorithm instance, so the try must cover that call too.
+        try
+        {
+            using var ecdsa = certificate.GetECDsaPrivateKey();
+            if (ecdsa is not null)
+            {
+                ecdsa.SignData(Probe, HashAlgorithmName.SHA256);
+                return true;
+            }
+
+            using var rsa = certificate.GetRSAPrivateKey();
+            if (rsa is not null)
+            {
+                rsa.SignData(Probe, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+                return true;
+            }
+
+            // Neither algorithm this library ever creates; leave the certificate as it is.
+            return true;
+        }
+        catch (CryptographicException ex)
+        {
+            failure = ex;
+            return false;
+        }
+    }
+
+    private static readonly byte[] Probe = [0];
 
     /// <summary>Loads a public-only certificate (no private key) from DER bytes.</summary>
     public static X509Certificate2 LoadPublic(byte[] der)
